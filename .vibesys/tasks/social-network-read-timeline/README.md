@@ -32,3 +32,5 @@ and read-your-write properties:
 
 The packaged `servicebench` entry point provides the benchmark. Its workload
 is `.vibesys/tasks/social-network-read-timeline/benchmark/workload.toml`.
+The checker builds into `/tmp/vibesys-social-network-read-timeline/`, outside
+the read-only task tree.

@@ -56,7 +56,7 @@ Reservations are persistent and have no public deletion API. Accuracy and
 benchmark traffic use collision-resistant future dates, and each evaluation
 must start from a disposable Compose project or be torn down with volumes. A
 plain process restart is not a clean reset. The packaged evaluator and authored
-`.vibesys/` task inputs are outside candidate ownership. Generated telemetry is
-stored under `.vibesys/state/local/hotel-reservation/`. The managed accuracy
-runner also proves that acknowledged capacity consumption and search visibility
-survive a candidate restart.
+`.vibesys/` task inputs are outside candidate ownership. Ephemeral telemetry is
+stored under `/tmp/vibesys-hotel-reservation/`. The managed accuracy runner also
+proves that acknowledged capacity consumption and search visibility survive a
+candidate restart.

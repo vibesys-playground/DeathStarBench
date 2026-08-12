@@ -20,7 +20,7 @@ docker compose -f hotelReservation/docker-compose.yml up -d --build
 Reservations persist in Compose volumes and have no deletion API. The evaluator
 uses randomized future dates and runs `docker compose down -v` after each
 managed evaluation. Generated telemetry is local run state under
-`.vibesys/state/local/hotel-reservation/`.
+`/tmp/vibesys-hotel-reservation/`.
 
 The authored contract, workload, telemetry description, and reference metadata
 are immutable task input. The optimization candidate is the repository outside

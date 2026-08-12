@@ -2,9 +2,7 @@
 set -euo pipefail
 
 task_root="$(cd "$(dirname "$0")/.." && pwd)"
-project_root="$(cd "$task_root/../../.." && pwd)"
-local_state_root="${VIBESYS_LOCAL_STATE_DIR:-$project_root/.vibesys/state/local}"
-build_root="$local_state_root/social-network-read-timeline/checker-build"
+build_root="${TMPDIR:-/tmp}/vibesys-social-network-read-timeline/checker-build"
 
 jobs="${CMAKE_BUILD_PARALLEL_LEVEL:-}"
 if [[ -z "$jobs" ]]; then
