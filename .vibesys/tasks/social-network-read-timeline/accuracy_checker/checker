@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+task_root="$(cd "$(dirname "$0")/.." && pwd)"
+project_root="$(cd "$task_root/../../.." && pwd)"
+local_state_root="${VIBESYS_LOCAL_STATE_DIR:-$project_root/.vibesys/state/local}"
+build_root="$local_state_root/social-network-read-timeline/checker-build"
+
+jobs="${CMAKE_BUILD_PARALLEL_LEVEL:-}"
+if [[ -z "$jobs" ]]; then
+  jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
+fi
+
+cmake -S "$task_root" -B "$build_root" -DCMAKE_BUILD_TYPE=Release >/dev/null
+cmake --build "$build_root" --parallel "$jobs" >/dev/null
+exec "$build_root/checker" "$@"

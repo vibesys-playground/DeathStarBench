@@ -1,0 +1,24 @@
+version = 1
+
+[agent]
+domain = "microservices"
+
+[evaluator]
+name = "vibesys-evaluator-microservice"
+version = "0.1.0"
+
+[accuracy]
+command = ["./.vibesys/tasks/social-network-read-timeline/accuracy_checker/checker"]
+timeout_seconds = 120
+
+[benchmark]
+entrypoint = "servicebench"
+args = [
+  "--workload", "${PROJECT_ROOT}/.vibesys/tasks/social-network-read-timeline/benchmark/workload.toml",
+  "--fixture-seed", "random",
+]
+timeout_seconds = 300
+
+[benchmark.result]
+json_argument = "--output-json"
+metric = "primary_value"
