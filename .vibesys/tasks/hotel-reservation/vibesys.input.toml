@@ -29,7 +29,7 @@ args = [
   "--seed", "random",
   "--fixture-seed", "random",
   "--candidate-dir", "${PROJECT_ROOT}/hotelReservation",
-  "--run-command-json", "[\"sh\",\"-c\",\"rm -f /tmp/vibesys-hotel-reservation/otel/traces.otlp.ndjson && go -C ${PACKAGE_ROOT} run ./cmd/otelinject --compose ${PROJECT_ROOT}/hotelReservation/docker-compose.yml --config ${PROJECT_ROOT}/.vibesys/tasks/hotel-reservation/benchmark/otel/telemetry.toml --metrics-dir /tmp/vibesys-hotel-reservation/otel --output /tmp/vibesys-hotel-reservation/otel/compose.telemetry.yaml && docker compose -f ${PROJECT_ROOT}/hotelReservation/docker-compose.yml -f /tmp/vibesys-hotel-reservation/otel/compose.telemetry.yaml up -d --build\"]",
+  "--run-command-json", "[\"sh\",\"-c\",\"rm -f /tmp/vibesys-hotel-reservation/otel/traces.otlp.ndjson && go -C \\\"$1\\\" run ./cmd/otelinject --compose \\\"$2\\\" --config \\\"$3\\\" --metrics-dir /tmp/vibesys-hotel-reservation/otel --output /tmp/vibesys-hotel-reservation/otel/compose.telemetry.yaml && docker compose -f \\\"$2\\\" -f /tmp/vibesys-hotel-reservation/otel/compose.telemetry.yaml up -d --build\",\"vibesys-hotel-run\",\"${PACKAGE_ROOT}\",\"${PROJECT_ROOT}/hotelReservation/docker-compose.yml\",\"${PROJECT_ROOT}/.vibesys/tasks/hotel-reservation/benchmark/otel/telemetry.toml\"]",
   "--stop-command-json", "[\"docker\",\"compose\",\"stop\",\"-t\",\"10\",\"frontend\",\"geo\",\"profile\",\"rate\",\"recommendation\",\"reservation\",\"search\",\"user\"]",
   "--cleanup-command-json", "[\"docker\",\"compose\",\"down\",\"-v\",\"--remove-orphans\"]",
   "--startup-timeout", "120",
