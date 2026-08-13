@@ -3,4 +3,4 @@ schema_version = 1
 [[package]]
 name = "vibesys-evaluator-microservice"
 version = "0.1.0"
-digest = "sha256:1cdb190acd6d83c4b4c2c65bf9d4d89eb05a1536614cf276f9aec9e4f90eec86"
+digest = "sha256:780413426827fe283f02f30b02604251bc77bb5893b2381026d527ca07ee60cc"
