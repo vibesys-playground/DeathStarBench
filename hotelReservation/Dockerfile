@@ -6,8 +6,10 @@ COPY go.sum go.sum
 COPY go.mod go.mod
 COPY vendor/ vendor/
 
+COPY changes/ changes/
 COPY cmd/ cmd/
 COPY dialer/ dialer/
+COPY lease/ lease/
 COPY registry/ registry/
 COPY services/ services/
 COPY tls/ tls/
