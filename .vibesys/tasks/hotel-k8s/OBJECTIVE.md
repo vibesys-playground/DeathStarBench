@@ -16,7 +16,8 @@ latency is a win; a change that trades one for the other is a tradeoff, not a pr
 ## Scope
 
 You may change only code under `hotelReservation/`: the Go services in `services/`,
-`cmd/`, `dialer/`, `registry/`, `tracing/`, `tune/`, `tls/`, the module and its
+`cmd/`, `dialer/`, `registry/`, `tracing/`, `tune/`, `tls/`, `lease/`, `changes/`,
+`internal/`, the module and its
 `vendor/` tree, and `hotelReservation/Dockerfile` (it builds the one image that all
 eight application services run). Do not touch `.vibesys/`.
 
@@ -51,25 +52,71 @@ writes before the application services start: 25,000 hotels in 20 cities worldwi
 profile, a location, 1 to 5 rate plans over the year 2027, a rating, a price and a room
 capacity, and 10,000 user accounts; about 30 MB of documents, with indexes on the
 services' query keys. A service finds its collection non-empty and must not replace or
-rewrite it; it may read it however it likes (and add indexes of its own). Requests are
-spread realistically over this data: search and recommendation locations by city
-popularity with a continuous spread, stays of 1 to 7 nights over 2027, logins and
-reservations by user and hotel popularity, so exact-request caching hits rarely and
-caches have to be sized for the data.
+rewrite it; it may read it however it likes (and add indexes of its own). The data
+changes only through the owner routes below. Requests are spread realistically over
+this data: search and recommendation locations by city popularity with a continuous
+spread, stays of 1 to 7 nights over 2027, logins and reservations by user and hotel
+popularity, so exact-request caching hits rarely and caches have to be sized for the
+data. About 1% of the requests are owner writes, drawn by the same hotel popularity, so
+hot data changes during the run.
+
+## Writes and their visibility
+
+The frontend serves owner-side writes, each stored by the service that owns the data
+in its MongoDB database. Parameters come from the query string or a form body.
+
+| Route | Effect | Errors |
+| --- | --- | --- |
+| `POST /admin/rate?hotelId=&code=&bookableRate=&totalRate=&totalRateInclusive=` | Sets the three prices of one rate plan. | 400 missing or negative amount; 404 unknown hotel or plan code |
+| `POST /admin/profile?hotelId=&name=&phone=` | Sets the hotel's name and/or phone (at least one; an empty one is unchanged). | 400 neither given; 404 unknown hotel |
+| `POST /admin/capacity?hotelId=&rooms=` | Sets the hotel's room count. | 400 missing or negative; 404 unknown hotel; 409 when some night already has more rooms reserved |
+| `POST /admin/hotel` (JSON body) | Adds a hotel: profile, rate plans, capacity, rating and price, location. | 400 malformed body or invalid field; 409 ID taken |
+| `GET /rates?hotelId=` | Reads the hotel's rate plans with their current prices. | 400 missing hotelId |
+
+A write is acknowledged with HTTP 200 and `{"message": ...}` (`Rate updated.`,
+`Profile updated.`, `Capacity updated.`, `Hotel added.`); any other answer is not an
+acknowledgement. The `/admin/hotel` body is
+`{"hotelId", "name", "phoneNumber", "description", "address": {"streetNumber",
+"streetName", "city", "state", "country", "postalCode"}, "lat", "lon", "rating",
+"price", "rooms", "ratePlans": [{"code", "inDate", "outDate", "roomType": {"code",
+"roomDescription", "bookableRate", "totalRate", "totalRateInclusive"}}]}`; unknown
+fields are rejected, a hotel ID is 1 to 64 letters, digits or `-`, and at least one
+rate plan is required. `GET /rates` answers `{"hotelId", "ratePlans": [...]}` with the
+plans in that shape.
+
+The contract:
+- Bounded staleness: once a write is acknowledged, every read that starts more than
+  1 second later reflects it, on every path (search, the three recommendations, the
+  GeoJSON profile fields, `/rates`, reservations) and through every instance of every
+  service. An added hotel is found by search and recommendations, and has its
+  profile, rate plans and capacity, within the same bound.
+- Within that second a read may show the new value or the one before it. Reads are
+  not required to be monotonic: two reads in that window may disagree in either order.
+- A write that was not acknowledged (an error or a timeout) may or may not take effect.
+- Capacity is strict and immediate: a reservation that starts after a capacity write is
+  acknowledged is decided against the new capacity, never against an old one, and no
+  write may make a night overbooked (that is the 409). Reservations are never
+  oversold.
+- Acknowledged writes are durable: they survive a restart of any stateless service or
+  cache, and a restarted instance never serves an older value.
 
 ## Correctness bar
 
 The check deploys the candidate and runs the Go semantic oracle in accuracy mode. It
 passes only if every observation matches the reference behavior of the pinned
 application: the four frontend routes `/hotels`, `/recommendations`, `/user`,
-`/reservation` with exact response schemas and values over the task's dataset; reservation
+`/reservation` with exact response schemas and values over the task's dataset and the
+writes made so far; the owner routes and `/rates` with the contract above (the oracle
+reads every write at 1 s plus a margin, at least eight times so the reads reach every
+instance, and again after restarting the stateless pods); reservation
 capacity by hotel and night (atomic, over-capacity rejection, no overselling of
 sequential requests); degenerate date ranges; concurrent isolation; and durability:
 acknowledged reservations survive a restart of the stateless services and of the
 reservation cache tier. The oracle also restarts those pods during the check.
 `/reservation` still reaches the reservation service after an invalid login, as in
 the pinned reference. The load generator checks every response of the benchmark the same
-way, and a single wrong answer fails the measurement.
+way, accepting for each read exactly the values the contract allows given the writes it
+has made, and a single wrong answer fails the measurement.
 
 The reference semantics include these details, which an optimization must keep:
 - search answers the hotels that the pinned geo service returns (go-geoindex's
@@ -98,7 +145,8 @@ frontend service. A candidate that does not become ready in 300 seconds fails.
 
 - No caching of benchmark inputs or answers keyed on the workload (fixed seeds,
   fixed dates, the seeded user or hotel ids) beyond what a production system would
-  do; every cache must stay correct under the reservation writes the oracle makes.
+  do; every cache and in-memory copy must honour the write contract above, for any
+  hotel, under the reservations and owner writes of the benchmark and the oracle.
 - The data comes from MongoDB at run time: do not embed the dataset, its generator or
   answers precomputed from them in the candidate (as if the data could change).
 - Do not skip work the oracle cannot see: no dropped traces on purpose beyond the
