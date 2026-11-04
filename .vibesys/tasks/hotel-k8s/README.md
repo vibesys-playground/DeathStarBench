@@ -7,10 +7,10 @@ is a candidate input: the CLI versions these files as the task.
 | Path | What |
 | --- | --- |
 | `vibesys.input.toml`, `objectives.toml` | Manifest and the two Pareto objectives. |
-| `Dockerfile` | Job image: kubectl 1.34, buildctl, Go, Python 3, and `servicebench` and `hotel-correctness` built from a clone of the vibesys repository at commit `de037943cb6a8e6e73d00e8bc19fa53570558583`. Base images are pinned by digest. |
+| `Dockerfile` | Job image: kubectl 1.34, buildctl, Go, Python 3, and `loadgen` and `hotel-correctness` built from `evaluator/` against a clone of the vibesys repository at commit `de037943cb6a8e6e73d00e8bc19fa53570558583` (the generic servicebench engine). Base images are pinned by digest. |
 | `run.py` | Trusted wrapper: `check`, `benchmark`, and `ctl` (the oracle's crash/start commands). |
 | `k8s/manifest.yaml` | The application: 19 Deployments, 19 Services, 8 ConfigMaps. |
-| `evaluator/` | The Go semantic oracle (`hotel-correctness`, in `internal/accuracyapps/hotel`), copied from `examples/microservices/hotel-correctness/.vibesys/tasks/compose/evaluator` at the vibesys commit above, tests dropped; its `go.mod` replaces the evaluator modules by the Dockerfile's clone at `/src`. |
+| `evaluator/` | One Go module holding all Hotel knowledge; it imports only vibesys's generic engine packages, and its `go.mod` replaces them by the Dockerfile's clone at `/src`. `cmd/loadgen` is servicebench (same flags) with the task's Hotel adapter. `internal/apps/hotel` (the benchmark adapter: request distributions, expected answers) and `internal/appsupport/hotel` (seed users, capacities, topology and preflight probes) are copied from `resources/evaluators/microservice/` at the vibesys commit above, with their tests; `golden_test.go` pins their request and validation stream to that commit. `cmd/hotel-correctness` and `internal/accuracyapps/hotel` are the semantic oracle, copied from `examples/microservices/hotel-correctness/.vibesys/tasks/compose/evaluator` at the same commit, tests dropped; it shares `internal/appsupport/hotel` with the load generator. |
 | `workload/closed.toml` | Closed loop, concurrency 32, the canonical mixed workload; also the oracle's workload. Objective `operations_per_second`. |
 | `workload/open.toml` | The same mix, open loop at a fixed offered rate; objective `latency_ms.p99`. |
 
@@ -26,7 +26,7 @@ is a candidate input: the CLI versions these files as the task.
 4. `check`: runs `hotel-correctness --mode accuracy` against the forwarded port; its crash and
    start events scale the stateless services and `memcached-reserve` to 0 and back through
    `run.py ctl`. Exit 0 is a pass.
-   `benchmark`: builds a load-generator image (busybox + `servicebench` + `workload/`) and runs two
+   `benchmark`: builds a load-generator image (busybox + `loadgen` + `workload/`) and runs two
    Kubernetes Jobs inside the namespace against `http://frontend:5000`: `closed` (operations per
    second) then `open` (p99 latency at the declared rate). One protocol-2 result carries both.
 5. Deletes the namespace on every exit path the process can see: normal end, error, SIGTERM,

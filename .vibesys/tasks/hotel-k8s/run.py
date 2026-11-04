@@ -168,12 +168,12 @@ def build_loadgen_image(scratch: Path) -> str:
     registry = require_env("VIBESYS_K8S_REGISTRY")
     context = scratch / "loadgen"
     (context / "workload").mkdir(parents=True)
-    shutil.copy(tool("servicebench"), context / "servicebench")
+    shutil.copy(tool("loadgen"), context / "loadgen")
     for name in ("closed.toml", "open.toml"):
         shutil.copy(WORKLOADS / name, context / "workload" / name)
     (context / "Dockerfile").write_text(
         f"FROM {LOADGEN_BASE}\n"
-        "COPY servicebench /usr/local/bin/servicebench\n"
+        "COPY loadgen /usr/local/bin/loadgen\n"
         "COPY workload/ /workload/\n"
     )
     image = f"{registry}/hotel-k8s/loadgen:{tree_digest(context)}"
@@ -401,7 +401,7 @@ spec:
         command: ["sh", "-c"]
         args:
         - |
-          servicebench --mode benchmark --workload /workload/{workload}.toml \\
+          loadgen --mode benchmark --workload /workload/{workload}.toml \\
             --base-url {url} --startup-timeout 120 \\
             --output-json /tmp/summary.json --vs-output /tmp/stream.jsonl
           rc=$?
@@ -412,7 +412,7 @@ spec:
 
 
 def run_phase(deployment: Deployment, image: str, workload: str, artifacts: Path | None) -> dict:
-    """Run one servicebench Job in the namespace; return its protocol-2 result values."""
+    """Run one load-generator Job in the namespace; return its protocol-2 result values."""
     name = f"loadgen-{workload}"
     log(f"phase {workload}: starting Job {name}")
     manifest = LOADGEN_JOB.format(
@@ -437,7 +437,7 @@ def run_phase(deployment: Deployment, image: str, workload: str, artifacts: Path
     if "::summary::" in logs and "::stream::" in logs:
         head, _, stream_text = logs.partition("::stream::")
         summary_text = head.partition("::summary::")[2]
-        log(f"phase {workload} servicebench output:\n" + head.partition("::summary::")[0][-1500:])
+        log(f"phase {workload} loadgen output:\n" + head.partition("::summary::")[0][-1500:])
     else:
         raise JobError(f"Job {name} produced no result stream; log tail:\n{logs[-1500:]}")
     if artifacts:
