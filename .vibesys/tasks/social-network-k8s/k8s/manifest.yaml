@@ -1,0 +1,1401 @@
+# Task-owned deployment of DeathStarBench Social Network for social-network-k8s.
+# run.py substitutes ${NAMESPACE} and ${SOCIAL_NETWORK_IMAGE} (the candidate image
+# built from socialNetwork/) and applies the data tier (tier: data) before the
+# application (tier: app). Replica counts, resources and the data tier are the
+# task's; the code, nginx.conf, Lua scripts and service-config.json come from
+# the candidate image. Every container has requests == limits.
+---
+# Tracing is the task's: every hop reports spans to the task's jaeger at a fixed
+# sampling ratio (per-hop latency comes from these traces).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jaeger-config
+data:
+  jaeger-config.yml: |
+    disabled: false
+    reporter:
+      logSpans: false
+      localAgentHostPort: "jaeger:6831"
+      queueSize: 1000000
+      bufferFlushInterval: 10
+    sampler:
+      type: "probabilistic"
+      param: 0.01
+  jaeger-config.json: |
+    {
+      "service_name": "nginx-web-server",
+      "disabled": false,
+      "reporter": {
+        "logSpans": false,
+        "localAgentHostPort": "jaeger:6831",
+        "queueSize": 1000000,
+        "bufferFlushInterval": 10
+      },
+      "sampler": {
+        "type": "probabilistic",
+        "param": 0.01
+      }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  labels:
+    app: jaeger
+spec:
+  type: ClusterIP
+  selector:
+    app: jaeger
+  ports:
+  - name: p6831
+    port: 6831
+    targetPort: 6831
+    protocol: UDP
+  - name: p6832
+    port: 6832
+    targetPort: 6832
+    protocol: UDP
+  - name: p5778
+    port: 5778
+    targetPort: 5778
+  - name: p16686
+    port: 16686
+    targetPort: 16686
+  - name: p14268
+    port: 14268
+    targetPort: 14268
+  - name: p14269
+    port: 14269
+    targetPort: 14269
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  labels:
+    app: jaeger
+    tier: data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+        app: jaeger
+        tier: data
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: jaeger
+        image: docker.io/jaegertracing/all-in-one:1.57@sha256:8f165334f418ca53691ce358c19b4244226ed35c5d18408c5acf305af2065fb9
+        imagePullPolicy: IfNotPresent
+        args: ["--memory.max-traces=100000"]
+        resources:
+          requests: {cpu: "2", memory: 2Gi}
+          limits: {cpu: "2", memory: 2Gi}
+        ports:
+        - containerPort: 6831
+          protocol: UDP
+        - containerPort: 16686
+        - containerPort: 14269
+        readinessProbe:
+          httpGet: {path: /, port: 14269}
+          periodSeconds: 2
+          failureThreshold: 60
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: post-storage-mongodb
+  labels:
+    app: post-storage-mongodb
+spec:
+  type: ClusterIP
+  selector:
+    app: post-storage-mongodb
+  ports:
+  - name: p27017
+    port: 27017
+    targetPort: 27017
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: post-storage-mongodb
+  labels:
+    app: post-storage-mongodb
+    tier: data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: post-storage-mongodb
+  template:
+    metadata:
+      labels:
+        app: post-storage-mongodb
+        tier: data
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: mongodb
+        image: docker.io/library/mongo:4.4.6@sha256:6efa052039903e731e4a5550c68a13c4869ddc93742c716332883fd9c77eb79b
+        imagePullPolicy: IfNotPresent
+        args: ["--bind_ip_all", "--wiredTigerCacheSizeGB", "2"]
+        resources:
+          requests: {cpu: "2", memory: 4Gi}
+          limits: {cpu: "2", memory: 4Gi}
+        ports:
+        - containerPort: 27017
+        readinessProbe:
+          exec:
+            command: ["mongo", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+          periodSeconds: 2
+          timeoutSeconds: 5
+          failureThreshold: 90
+        volumeMounts:
+        - name: data
+          mountPath: /data/db
+      volumes:
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: social-graph-mongodb
+  labels:
+    app: social-graph-mongodb
+spec:
+  type: ClusterIP
+  selector:
+    app: social-graph-mongodb
+  ports:
+  - name: p27017
+    port: 27017
+    targetPort: 27017
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: social-graph-mongodb
+  labels:
+    app: social-graph-mongodb
+    tier: data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: social-graph-mongodb
+  template:
+    metadata:
+      labels:
+        app: social-graph-mongodb
+        tier: data
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: mongodb
+        image: docker.io/library/mongo:4.4.6@sha256:6efa052039903e731e4a5550c68a13c4869ddc93742c716332883fd9c77eb79b
+        imagePullPolicy: IfNotPresent
+        args: ["--bind_ip_all", "--wiredTigerCacheSizeGB", "2"]
+        resources:
+          requests: {cpu: "2", memory: 4Gi}
+          limits: {cpu: "2", memory: 4Gi}
+        ports:
+        - containerPort: 27017
+        readinessProbe:
+          exec:
+            command: ["mongo", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+          periodSeconds: 2
+          timeoutSeconds: 5
+          failureThreshold: 90
+        volumeMounts:
+        - name: data
+          mountPath: /data/db
+      volumes:
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: url-shorten-mongodb
+  labels:
+    app: url-shorten-mongodb
+spec:
+  type: ClusterIP
+  selector:
+    app: url-shorten-mongodb
+  ports:
+  - name: p27017
+    port: 27017
+    targetPort: 27017
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: url-shorten-mongodb
+  labels:
+    app: url-shorten-mongodb
+    tier: data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: url-shorten-mongodb
+  template:
+    metadata:
+      labels:
+        app: url-shorten-mongodb
+        tier: data
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: mongodb
+        image: docker.io/library/mongo:4.4.6@sha256:6efa052039903e731e4a5550c68a13c4869ddc93742c716332883fd9c77eb79b
+        imagePullPolicy: IfNotPresent
+        args: ["--bind_ip_all", "--wiredTigerCacheSizeGB", "2"]
+        resources:
+          requests: {cpu: "2", memory: 4Gi}
+          limits: {cpu: "2", memory: 4Gi}
+        ports:
+        - containerPort: 27017
+        readinessProbe:
+          exec:
+            command: ["mongo", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+          periodSeconds: 2
+          timeoutSeconds: 5
+          failureThreshold: 90
+        volumeMounts:
+        - name: data
+          mountPath: /data/db
+      volumes:
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-mongodb
+  labels:
+    app: user-mongodb
+spec:
+  type: ClusterIP
+  selector:
+    app: user-mongodb
+  ports:
+  - name: p27017
+    port: 27017
+    targetPort: 27017
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-mongodb
+  labels:
+    app: user-mongodb
+    tier: data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: user-mongodb
+  template:
+    metadata:
+      labels:
+        app: user-mongodb
+        tier: data
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: mongodb
+        image: docker.io/library/mongo:4.4.6@sha256:6efa052039903e731e4a5550c68a13c4869ddc93742c716332883fd9c77eb79b
+        imagePullPolicy: IfNotPresent
+        args: ["--bind_ip_all", "--wiredTigerCacheSizeGB", "2"]
+        resources:
+          requests: {cpu: "2", memory: 4Gi}
+          limits: {cpu: "2", memory: 4Gi}
+        ports:
+        - containerPort: 27017
+        readinessProbe:
+          exec:
+            command: ["mongo", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+          periodSeconds: 2
+          timeoutSeconds: 5
+          failureThreshold: 90
+        volumeMounts:
+        - name: data
+          mountPath: /data/db
+      volumes:
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-timeline-mongodb
+  labels:
+    app: user-timeline-mongodb
+spec:
+  type: ClusterIP
+  selector:
+    app: user-timeline-mongodb
+  ports:
+  - name: p27017
+    port: 27017
+    targetPort: 27017
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-timeline-mongodb
+  labels:
+    app: user-timeline-mongodb
+    tier: data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: user-timeline-mongodb
+  template:
+    metadata:
+      labels:
+        app: user-timeline-mongodb
+        tier: data
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: mongodb
+        image: docker.io/library/mongo:4.4.6@sha256:6efa052039903e731e4a5550c68a13c4869ddc93742c716332883fd9c77eb79b
+        imagePullPolicy: IfNotPresent
+        args: ["--bind_ip_all", "--wiredTigerCacheSizeGB", "2"]
+        resources:
+          requests: {cpu: "2", memory: 4Gi}
+          limits: {cpu: "2", memory: 4Gi}
+        ports:
+        - containerPort: 27017
+        readinessProbe:
+          exec:
+            command: ["mongo", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+          periodSeconds: 2
+          timeoutSeconds: 5
+          failureThreshold: 90
+        volumeMounts:
+        - name: data
+          mountPath: /data/db
+      volumes:
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: home-timeline-redis
+  labels:
+    app: home-timeline-redis
+spec:
+  type: ClusterIP
+  selector:
+    app: home-timeline-redis
+  ports:
+  - name: p6379
+    port: 6379
+    targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: home-timeline-redis
+  labels:
+    app: home-timeline-redis
+    tier: data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: home-timeline-redis
+  template:
+    metadata:
+      labels:
+        app: home-timeline-redis
+        tier: data
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: redis
+        image: docker.io/library/redis:6.2.4@sha256:6bc98f513258e0c17bd150a7a26f38a8ce3e7d584f0c451cf31df70d461a200a
+        imagePullPolicy: IfNotPresent
+        args: ["--save", "", "--appendonly", "no", "--maxmemory", "3gb", "--maxmemory-policy", "noeviction"]
+        resources:
+          requests: {cpu: "1", memory: 4Gi}
+          limits: {cpu: "1", memory: 4Gi}
+        ports:
+        - containerPort: 6379
+        readinessProbe:
+          exec:
+            command: ["redis-cli", "ping"]
+          periodSeconds: 2
+          failureThreshold: 90
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: social-graph-redis
+  labels:
+    app: social-graph-redis
+spec:
+  type: ClusterIP
+  selector:
+    app: social-graph-redis
+  ports:
+  - name: p6379
+    port: 6379
+    targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: social-graph-redis
+  labels:
+    app: social-graph-redis
+    tier: data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: social-graph-redis
+  template:
+    metadata:
+      labels:
+        app: social-graph-redis
+        tier: data
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: redis
+        image: docker.io/library/redis:6.2.4@sha256:6bc98f513258e0c17bd150a7a26f38a8ce3e7d584f0c451cf31df70d461a200a
+        imagePullPolicy: IfNotPresent
+        args: ["--save", "", "--appendonly", "no", "--maxmemory", "3gb", "--maxmemory-policy", "noeviction"]
+        resources:
+          requests: {cpu: "1", memory: 4Gi}
+          limits: {cpu: "1", memory: 4Gi}
+        ports:
+        - containerPort: 6379
+        readinessProbe:
+          exec:
+            command: ["redis-cli", "ping"]
+          periodSeconds: 2
+          failureThreshold: 90
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-timeline-redis
+  labels:
+    app: user-timeline-redis
+spec:
+  type: ClusterIP
+  selector:
+    app: user-timeline-redis
+  ports:
+  - name: p6379
+    port: 6379
+    targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-timeline-redis
+  labels:
+    app: user-timeline-redis
+    tier: data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: user-timeline-redis
+  template:
+    metadata:
+      labels:
+        app: user-timeline-redis
+        tier: data
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: redis
+        image: docker.io/library/redis:6.2.4@sha256:6bc98f513258e0c17bd150a7a26f38a8ce3e7d584f0c451cf31df70d461a200a
+        imagePullPolicy: IfNotPresent
+        args: ["--save", "", "--appendonly", "no", "--maxmemory", "3gb", "--maxmemory-policy", "noeviction"]
+        resources:
+          requests: {cpu: "1", memory: 4Gi}
+          limits: {cpu: "1", memory: 4Gi}
+        ports:
+        - containerPort: 6379
+        readinessProbe:
+          exec:
+            command: ["redis-cli", "ping"]
+          periodSeconds: 2
+          failureThreshold: 90
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: post-storage-memcached
+  labels:
+    app: post-storage-memcached
+spec:
+  type: ClusterIP
+  selector:
+    app: post-storage-memcached
+  ports:
+  - name: p11211
+    port: 11211
+    targetPort: 11211
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: post-storage-memcached
+  labels:
+    app: post-storage-memcached
+    tier: data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: post-storage-memcached
+  template:
+    metadata:
+      labels:
+        app: post-storage-memcached
+        tier: data
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: memcached
+        image: docker.io/library/memcached:1.6.7@sha256:007b9ca55759c6ef3dcc9a08be6b45b31147bdd1db28358280fd62360387b9dd
+        imagePullPolicy: IfNotPresent
+        args: ["-m", "512", "-t", "2", "-c", "4096"]
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "1", memory: 1Gi}
+        ports:
+        - containerPort: 11211
+        readinessProbe:
+          tcpSocket: {port: 11211}
+          periodSeconds: 2
+          failureThreshold: 90
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: url-shorten-memcached
+  labels:
+    app: url-shorten-memcached
+spec:
+  type: ClusterIP
+  selector:
+    app: url-shorten-memcached
+  ports:
+  - name: p11211
+    port: 11211
+    targetPort: 11211
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: url-shorten-memcached
+  labels:
+    app: url-shorten-memcached
+    tier: data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: url-shorten-memcached
+  template:
+    metadata:
+      labels:
+        app: url-shorten-memcached
+        tier: data
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: memcached
+        image: docker.io/library/memcached:1.6.7@sha256:007b9ca55759c6ef3dcc9a08be6b45b31147bdd1db28358280fd62360387b9dd
+        imagePullPolicy: IfNotPresent
+        args: ["-m", "512", "-t", "2", "-c", "4096"]
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "1", memory: 1Gi}
+        ports:
+        - containerPort: 11211
+        readinessProbe:
+          tcpSocket: {port: 11211}
+          periodSeconds: 2
+          failureThreshold: 90
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-memcached
+  labels:
+    app: user-memcached
+spec:
+  type: ClusterIP
+  selector:
+    app: user-memcached
+  ports:
+  - name: p11211
+    port: 11211
+    targetPort: 11211
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-memcached
+  labels:
+    app: user-memcached
+    tier: data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: user-memcached
+  template:
+    metadata:
+      labels:
+        app: user-memcached
+        tier: data
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: memcached
+        image: docker.io/library/memcached:1.6.7@sha256:007b9ca55759c6ef3dcc9a08be6b45b31147bdd1db28358280fd62360387b9dd
+        imagePullPolicy: IfNotPresent
+        args: ["-m", "512", "-t", "2", "-c", "4096"]
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "1", memory: 1Gi}
+        ports:
+        - containerPort: 11211
+        readinessProbe:
+          tcpSocket: {port: 11211}
+          periodSeconds: 2
+          failureThreshold: 90
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: compose-post-service
+  labels:
+    app: compose-post-service
+spec:
+  type: ClusterIP
+  selector:
+    app: compose-post-service
+  ports:
+  - name: p9090
+    port: 9090
+    targetPort: 9090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: compose-post-service
+  labels:
+    app: compose-post-service
+    tier: app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: compose-post-service
+  template:
+    metadata:
+      labels:
+        app: compose-post-service
+        tier: app
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: compose-post-service
+        image: ${SOCIAL_NETWORK_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["ComposePostService"]
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "1", memory: 1Gi}
+        ports:
+        - containerPort: 9090
+        readinessProbe:
+          tcpSocket: {port: 9090}
+          periodSeconds: 2
+          failureThreshold: 150
+        volumeMounts:
+        - name: jaeger-config
+          mountPath: /social-network-microservices/config/jaeger-config.yml
+          subPath: jaeger-config.yml
+      volumes:
+      - name: jaeger-config
+        configMap:
+          name: jaeger-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: home-timeline-service
+  labels:
+    app: home-timeline-service
+spec:
+  type: ClusterIP
+  selector:
+    app: home-timeline-service
+  ports:
+  - name: p9090
+    port: 9090
+    targetPort: 9090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: home-timeline-service
+  labels:
+    app: home-timeline-service
+    tier: app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: home-timeline-service
+  template:
+    metadata:
+      labels:
+        app: home-timeline-service
+        tier: app
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: home-timeline-service
+        image: ${SOCIAL_NETWORK_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["HomeTimelineService"]
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "1", memory: 1Gi}
+        ports:
+        - containerPort: 9090
+        readinessProbe:
+          tcpSocket: {port: 9090}
+          periodSeconds: 2
+          failureThreshold: 150
+        volumeMounts:
+        - name: jaeger-config
+          mountPath: /social-network-microservices/config/jaeger-config.yml
+          subPath: jaeger-config.yml
+      volumes:
+      - name: jaeger-config
+        configMap:
+          name: jaeger-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: media-service
+  labels:
+    app: media-service
+spec:
+  type: ClusterIP
+  selector:
+    app: media-service
+  ports:
+  - name: p9090
+    port: 9090
+    targetPort: 9090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: media-service
+  labels:
+    app: media-service
+    tier: app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: media-service
+  template:
+    metadata:
+      labels:
+        app: media-service
+        tier: app
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: media-service
+        image: ${SOCIAL_NETWORK_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["MediaService"]
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "1", memory: 1Gi}
+        ports:
+        - containerPort: 9090
+        readinessProbe:
+          tcpSocket: {port: 9090}
+          periodSeconds: 2
+          failureThreshold: 150
+        volumeMounts:
+        - name: jaeger-config
+          mountPath: /social-network-microservices/config/jaeger-config.yml
+          subPath: jaeger-config.yml
+      volumes:
+      - name: jaeger-config
+        configMap:
+          name: jaeger-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: post-storage-service
+  labels:
+    app: post-storage-service
+spec:
+  type: ClusterIP
+  selector:
+    app: post-storage-service
+  ports:
+  - name: p9090
+    port: 9090
+    targetPort: 9090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: post-storage-service
+  labels:
+    app: post-storage-service
+    tier: app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: post-storage-service
+  template:
+    metadata:
+      labels:
+        app: post-storage-service
+        tier: app
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: post-storage-service
+        image: ${SOCIAL_NETWORK_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["PostStorageService"]
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "1", memory: 1Gi}
+        ports:
+        - containerPort: 9090
+        readinessProbe:
+          tcpSocket: {port: 9090}
+          periodSeconds: 2
+          failureThreshold: 150
+        volumeMounts:
+        - name: jaeger-config
+          mountPath: /social-network-microservices/config/jaeger-config.yml
+          subPath: jaeger-config.yml
+      volumes:
+      - name: jaeger-config
+        configMap:
+          name: jaeger-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: social-graph-service
+  labels:
+    app: social-graph-service
+spec:
+  type: ClusterIP
+  selector:
+    app: social-graph-service
+  ports:
+  - name: p9090
+    port: 9090
+    targetPort: 9090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: social-graph-service
+  labels:
+    app: social-graph-service
+    tier: app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: social-graph-service
+  template:
+    metadata:
+      labels:
+        app: social-graph-service
+        tier: app
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: social-graph-service
+        image: ${SOCIAL_NETWORK_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["SocialGraphService"]
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "1", memory: 1Gi}
+        ports:
+        - containerPort: 9090
+        readinessProbe:
+          tcpSocket: {port: 9090}
+          periodSeconds: 2
+          failureThreshold: 150
+        volumeMounts:
+        - name: jaeger-config
+          mountPath: /social-network-microservices/config/jaeger-config.yml
+          subPath: jaeger-config.yml
+      volumes:
+      - name: jaeger-config
+        configMap:
+          name: jaeger-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: text-service
+  labels:
+    app: text-service
+spec:
+  type: ClusterIP
+  selector:
+    app: text-service
+  ports:
+  - name: p9090
+    port: 9090
+    targetPort: 9090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: text-service
+  labels:
+    app: text-service
+    tier: app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: text-service
+  template:
+    metadata:
+      labels:
+        app: text-service
+        tier: app
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: text-service
+        image: ${SOCIAL_NETWORK_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["TextService"]
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "1", memory: 1Gi}
+        ports:
+        - containerPort: 9090
+        readinessProbe:
+          tcpSocket: {port: 9090}
+          periodSeconds: 2
+          failureThreshold: 150
+        volumeMounts:
+        - name: jaeger-config
+          mountPath: /social-network-microservices/config/jaeger-config.yml
+          subPath: jaeger-config.yml
+      volumes:
+      - name: jaeger-config
+        configMap:
+          name: jaeger-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: unique-id-service
+  labels:
+    app: unique-id-service
+spec:
+  type: ClusterIP
+  selector:
+    app: unique-id-service
+  ports:
+  - name: p9090
+    port: 9090
+    targetPort: 9090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unique-id-service
+  labels:
+    app: unique-id-service
+    tier: app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: unique-id-service
+  template:
+    metadata:
+      labels:
+        app: unique-id-service
+        tier: app
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: unique-id-service
+        image: ${SOCIAL_NETWORK_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["UniqueIdService"]
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "1", memory: 1Gi}
+        ports:
+        - containerPort: 9090
+        readinessProbe:
+          tcpSocket: {port: 9090}
+          periodSeconds: 2
+          failureThreshold: 150
+        volumeMounts:
+        - name: jaeger-config
+          mountPath: /social-network-microservices/config/jaeger-config.yml
+          subPath: jaeger-config.yml
+      volumes:
+      - name: jaeger-config
+        configMap:
+          name: jaeger-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: url-shorten-service
+  labels:
+    app: url-shorten-service
+spec:
+  type: ClusterIP
+  selector:
+    app: url-shorten-service
+  ports:
+  - name: p9090
+    port: 9090
+    targetPort: 9090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: url-shorten-service
+  labels:
+    app: url-shorten-service
+    tier: app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: url-shorten-service
+  template:
+    metadata:
+      labels:
+        app: url-shorten-service
+        tier: app
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: url-shorten-service
+        image: ${SOCIAL_NETWORK_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["UrlShortenService"]
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "1", memory: 1Gi}
+        ports:
+        - containerPort: 9090
+        readinessProbe:
+          tcpSocket: {port: 9090}
+          periodSeconds: 2
+          failureThreshold: 150
+        volumeMounts:
+        - name: jaeger-config
+          mountPath: /social-network-microservices/config/jaeger-config.yml
+          subPath: jaeger-config.yml
+      volumes:
+      - name: jaeger-config
+        configMap:
+          name: jaeger-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-mention-service
+  labels:
+    app: user-mention-service
+spec:
+  type: ClusterIP
+  selector:
+    app: user-mention-service
+  ports:
+  - name: p9090
+    port: 9090
+    targetPort: 9090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-mention-service
+  labels:
+    app: user-mention-service
+    tier: app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: user-mention-service
+  template:
+    metadata:
+      labels:
+        app: user-mention-service
+        tier: app
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: user-mention-service
+        image: ${SOCIAL_NETWORK_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["UserMentionService"]
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "1", memory: 1Gi}
+        ports:
+        - containerPort: 9090
+        readinessProbe:
+          tcpSocket: {port: 9090}
+          periodSeconds: 2
+          failureThreshold: 150
+        volumeMounts:
+        - name: jaeger-config
+          mountPath: /social-network-microservices/config/jaeger-config.yml
+          subPath: jaeger-config.yml
+      volumes:
+      - name: jaeger-config
+        configMap:
+          name: jaeger-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-service
+  labels:
+    app: user-service
+spec:
+  type: ClusterIP
+  selector:
+    app: user-service
+  ports:
+  - name: p9090
+    port: 9090
+    targetPort: 9090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service
+  labels:
+    app: user-service
+    tier: app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: user-service
+  template:
+    metadata:
+      labels:
+        app: user-service
+        tier: app
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: user-service
+        image: ${SOCIAL_NETWORK_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["UserService"]
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "1", memory: 1Gi}
+        ports:
+        - containerPort: 9090
+        readinessProbe:
+          tcpSocket: {port: 9090}
+          periodSeconds: 2
+          failureThreshold: 150
+        volumeMounts:
+        - name: jaeger-config
+          mountPath: /social-network-microservices/config/jaeger-config.yml
+          subPath: jaeger-config.yml
+      volumes:
+      - name: jaeger-config
+        configMap:
+          name: jaeger-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-timeline-service
+  labels:
+    app: user-timeline-service
+spec:
+  type: ClusterIP
+  selector:
+    app: user-timeline-service
+  ports:
+  - name: p9090
+    port: 9090
+    targetPort: 9090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-timeline-service
+  labels:
+    app: user-timeline-service
+    tier: app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: user-timeline-service
+  template:
+    metadata:
+      labels:
+        app: user-timeline-service
+        tier: app
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: user-timeline-service
+        image: ${SOCIAL_NETWORK_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["UserTimelineService"]
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "1", memory: 1Gi}
+        ports:
+        - containerPort: 9090
+        readinessProbe:
+          tcpSocket: {port: 9090}
+          periodSeconds: 2
+          failureThreshold: 150
+        volumeMounts:
+        - name: jaeger-config
+          mountPath: /social-network-microservices/config/jaeger-config.yml
+          subPath: jaeger-config.yml
+      volumes:
+      - name: jaeger-config
+        configMap:
+          name: jaeger-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-thrift
+  labels:
+    app: nginx-thrift
+spec:
+  type: ClusterIP
+  selector:
+    app: nginx-thrift
+  ports:
+  - name: p8080
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-thrift
+  labels:
+    app: nginx-thrift
+    tier: app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nginx-thrift
+  template:
+    metadata:
+      labels:
+        app: nginx-thrift
+        tier: app
+    spec:
+      terminationGracePeriodSeconds: 5
+      enableServiceLinks: false
+      containers:
+      - name: nginx-thrift
+        image: ${SOCIAL_NETWORK_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["/usr/local/bin/nginx-thrift"]
+        env:
+        - name: fqdn_suffix
+          value: ".${NAMESPACE}.svc.cluster.local"
+        resources:
+          requests: {cpu: "1", memory: 2Gi}
+          limits: {cpu: "1", memory: 2Gi}
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          httpGet: {path: /, port: 8080}
+          periodSeconds: 2
+          failureThreshold: 150
+        volumeMounts:
+        - name: jaeger-config
+          mountPath: /usr/local/openresty/nginx/jaeger-config.json
+          subPath: jaeger-config.json
+      volumes:
+      - name: jaeger-config
+        configMap:
+          name: jaeger-config

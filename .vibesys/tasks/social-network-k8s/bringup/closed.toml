@@ -1,0 +1,60 @@
+# BRING-UP workload (temporary, until the task's evaluator lands): vibesys
+# servicebench's bundled Social Network adapter, the old read-timeline mix.
+version = 1
+name = "social-network-k8s-bringup-closed"
+application = "social-network"
+
+[load]
+model = "closed_loop"
+rate = 0
+duration_seconds = 20
+warmup_seconds = 10
+concurrency = 32
+timeout_seconds = 10
+repetitions = 2
+seed = 42
+fixture_seed = 42
+min_offered_rate_ratio = 0.95
+
+[[targets]]
+name = "gateway"
+protocol = "http"
+address = "http://nginx-thrift:8080"
+session_policy = "reuse"
+
+[[operations]]
+name = "user_timeline_read"
+target = "gateway"
+weight = 50
+tags = ["read"]
+
+[[operations]]
+name = "home_timeline_read"
+target = "gateway"
+weight = 40
+tags = ["read"]
+
+[[operations]]
+name = "compose_user_timeline"
+target = "gateway"
+weight = 10
+tags = ["write", "read-your-write"]
+
+[application_config]
+users = 50
+seed_posts_per_user = 10
+user_id_base = 700000
+username_prefix = "bc_"
+timeline_limit = 10
+setup_delay_seconds = 3
+
+[objective]
+name = "logical_operations_per_second"
+metric = "operations_per_second"
+direction = "maximize"
+unit = "operations/s"
+
+[constraints]
+min_success_rate = 1.0
+max_error_rate = 0.0
+min_operations_per_type = 1
