@@ -6,11 +6,13 @@
     run.py sweep                                              (delete stale namespaces only)
     run.py ctl       --namespace NS --port PORT start|stop    (used by the oracle)
 
-Every job builds the candidate image from ROOT/hotelReservation with buildctl,
-pushes it to the registry, deploys the task-owned manifests into a fresh
-namespace of the cluster, waits for readiness, runs the oracle or the load
-generator, and deletes the namespace on every exit path (normal, error, SIGTERM,
-SIGINT, SIGHUP). Only SIGKILL (which is what the CLI sends on cancel and timeout) leaks a namespace;
+Every job builds the candidate image from ROOT/hotelReservation and the task's
+evaluator image (loadgen, seed) with buildctl, pushes them to the registry,
+deploys the task-owned data tier into a fresh namespace of the cluster, seeds
+MongoDB with the task's dataset (a Job), deploys the application services,
+waits for readiness, runs the oracle or the load generator, and deletes the
+namespace on every exit path (normal, error, SIGTERM, SIGINT, SIGHUP). Only
+SIGKILL (which is what the CLI sends on cancel and timeout) leaks a namespace;
 the next job sweeps stale ones (see sweep_stale_namespaces).
 
 Environment (set by the vibesys-cli `kubernetes` resource, or by hand):
@@ -76,6 +78,15 @@ PROBE_PATHS = [
 # the bottleneck: 32 closed-loop workers or 512 open-loop workers.
 LOADGEN_CPU = "6"
 LOADGEN_MEMORY = "4Gi"
+# Seed Job pod: requests == limits. It generates the dataset (about 0.5 s) and
+# writes about 30 MB of documents into the six MongoDB servers concurrently.
+SEED_CPU = "2"
+SEED_MEMORY = "1Gi"
+SEED_TIMEOUT_SECONDS = 600
+# The application Deployments start only after the seed Job has filled MongoDB:
+# each service seeds its own test data into an empty collection, and geo and
+# recommendation load their collection once at startup.
+APP_DEPLOYMENTS = ["frontend", "geo", "profile", "rate", "recommendation", "reservation", "search", "user"]
 
 
 class JobError(Exception):
@@ -165,21 +176,44 @@ def build_hotel_image(project_root: Path) -> str:
 
 
 def build_loadgen_image(scratch: Path) -> str:
+    """The in-cluster evaluator image: loadgen, seed and the workloads."""
     registry = require_env("VIBESYS_K8S_REGISTRY")
     context = scratch / "loadgen"
     (context / "workload").mkdir(parents=True)
     shutil.copy(tool("loadgen"), context / "loadgen")
+    shutil.copy(tool("seed"), context / "seed")
     for name in ("closed.toml", "open.toml"):
         shutil.copy(WORKLOADS / name, context / "workload" / name)
     (context / "Dockerfile").write_text(
         f"FROM {LOADGEN_BASE}\n"
-        "COPY loadgen /usr/local/bin/loadgen\n"
+        "COPY loadgen seed /usr/local/bin/\n"
         "COPY workload/ /workload/\n"
     )
     image = f"{registry}/hotel-k8s/loadgen:{tree_digest(context)}"
-    log(f"building load-generator image {image}")
+    log(f"building evaluator image {image}")
     buildctl_build(context, image)
     return image
+
+
+def split_manifest(manifest: str) -> tuple[str, str]:
+    """Split the rendered manifest into (data tier and config, application Deployments)."""
+    data, app = [], []
+    for document in manifest.split("\n---\n"):
+        kind = name = ""
+        in_metadata = False
+        for line in document.splitlines():
+            if line.startswith("kind:"):
+                kind = line.split(":", 1)[1].strip()
+            elif line.startswith("metadata:"):
+                in_metadata = True
+            elif in_metadata and line.startswith("  name:") and not name:
+                name = line.split(":", 1)[1].strip().strip('"')
+            elif line and not line.startswith((" ", "#")):
+                in_metadata = False
+        (app if kind == "Deployment" and name in APP_DEPLOYMENTS else data).append(document)
+    if len(app) != len(APP_DEPLOYMENTS):
+        raise JobError(f"manifest has {len(app)} of the application Deployments {APP_DEPLOYMENTS}")
+    return "\n---\n".join(data), "\n---\n".join(app)
 
 
 class Deployment:
@@ -196,7 +230,7 @@ class Deployment:
         self._forward_proc: subprocess.Popen | None = None
 
     # -- lifecycle ---------------------------------------------------------
-    def create(self, hotel_image: str) -> None:
+    def create(self, hotel_image: str, evaluator_image: str, artifacts: Path | None) -> None:
         self.created = True  # even a half-created namespace must be deleted
         self.kube.kubectl("create", "namespace", self.name, namespaced=False)
         self.kube.kubectl(
@@ -206,8 +240,16 @@ class Deployment:
         )
         manifest = MANIFEST.read_text()
         manifest = manifest.replace("${NAMESPACE}", self.name).replace("${HOTEL_IMAGE}", hotel_image)
-        log(f"deploying into namespace {self.name}")
-        self.kube.kubectl("apply", "-f", "-", input_text=manifest)
+        data_tier, services = split_manifest(manifest)
+        log(f"deploying the data tier into namespace {self.name}")
+        self.kube.kubectl("apply", "-f", "-", input_text=data_tier)
+        self.kube.kubectl(
+            "wait", "--for=condition=Available", "deployment", "-l", "backend=mongodb",
+            "--timeout=300s", timeout=330,
+        )
+        seed_database(self, evaluator_image, artifacts)
+        log("deploying the application services")
+        self.kube.kubectl("apply", "-f", "-", input_text=services)
         self.kube.kubectl(
             "wait", "--for=condition=Available", "deployment", "--all", "--timeout=300s",
             timeout=330,
@@ -358,8 +400,10 @@ def do_check(project_root: Path, scratch: Path) -> int:
     deployment = Deployment(scratch)
     atexit.register(deployment.delete)
     sweep_stale_namespaces()
+    artifacts = artifacts_dir()
     image = build_hotel_image(project_root)
-    deployment.create(image)
+    evaluator_image = build_loadgen_image(scratch)
+    deployment.create(image, evaluator_image, artifacts)
     deployment.start_forward()
     deployment.wait_ready()
     log("running the semantic oracle")
@@ -411,16 +455,37 @@ spec:
 """
 
 
-def run_phase(deployment: Deployment, image: str, workload: str, artifacts: Path | None) -> dict:
-    """Run one load-generator Job in the namespace; return its protocol-2 result values."""
-    name = f"loadgen-{workload}"
-    log(f"phase {workload}: starting Job {name}")
-    manifest = LOADGEN_JOB.format(
-        name=name, image=image, cpu=LOADGEN_CPU, memory=LOADGEN_MEMORY, workload=workload,
-        url=FRONTEND_URL,
-    )
-    deployment.kube.kubectl("apply", "-f", "-", input_text=manifest)
-    deadline = time.monotonic() + 1500
+SEED_JOB = """\
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seed
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 5
+      containers:
+      - name: seed
+        image: {image}
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests: {{cpu: "{cpu}", memory: {memory}}}
+          limits: {{cpu: "{cpu}", memory: {memory}}}
+        command: ["seed", "--timeout", "{timeout}s"]
+"""
+
+
+def artifacts_dir() -> Path | None:
+    value = os.environ.get("VIBESYS_ARTIFACTS_DIR", "")
+    return Path(value) if value else None
+
+
+def wait_job(deployment: Deployment, name: str, timeout: float) -> tuple[bool, str]:
+    """Wait for a Job to finish; return (succeeded, its pod's log)."""
+    deadline = time.monotonic() + timeout
     while True:
         status = json.loads(
             deployment.kube.kubectl("get", f"job/{name}", "-o", "json").stdout
@@ -431,6 +496,45 @@ def run_phase(deployment: Deployment, image: str, workload: str, artifacts: Path
             raise JobError(f"Job {name} did not finish in time")
         time.sleep(3)
     logs = deployment.kube.kubectl("logs", f"job/{name}", check=False).stdout
+    return bool(status.get("succeeded")), logs
+
+
+def seed_database(deployment: Deployment, image: str, artifacts: Path | None) -> dict:
+    """Write the task's dataset into the namespace's MongoDB servers (Job "seed")."""
+    log("seeding MongoDB with the task's dataset: starting Job seed")
+    started = time.monotonic()
+    deployment.kube.kubectl("apply", "-f", "-", input_text=SEED_JOB.format(
+        image=image, cpu=SEED_CPU, memory=SEED_MEMORY, timeout=SEED_TIMEOUT_SECONDS,
+    ))
+    succeeded, logs = wait_job(deployment, "seed", SEED_TIMEOUT_SECONDS + 60)
+    if artifacts:
+        (artifacts / "seed.log").write_text(logs)
+    if not succeeded:
+        raise JobError(f"Job seed failed; log tail:\n{logs[-1500:]}")
+    summary = None
+    for line in logs.splitlines():
+        if line.startswith("{"):
+            summary = json.loads(line)
+    if summary is None or not summary.get("written"):
+        raise JobError(f"Job seed wrote no summary; log tail:\n{logs[-1500:]}")
+    if artifacts:
+        (artifacts / "seed.summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    documents = sum(item["documents"] for item in summary["written"])
+    log(f"seeded {documents} documents (dataset {summary['dataset_digest'][:16]}, "
+        f"documents {summary['documents_digest'][:16]}) in {time.monotonic() - started:.0f}s")
+    return summary
+
+
+def run_phase(deployment: Deployment, image: str, workload: str, artifacts: Path | None) -> dict:
+    """Run one load-generator Job in the namespace; return its protocol-2 result values."""
+    name = f"loadgen-{workload}"
+    log(f"phase {workload}: starting Job {name}")
+    manifest = LOADGEN_JOB.format(
+        name=name, image=image, cpu=LOADGEN_CPU, memory=LOADGEN_MEMORY, workload=workload,
+        url=FRONTEND_URL,
+    )
+    deployment.kube.kubectl("apply", "-f", "-", input_text=manifest)
+    _, logs = wait_job(deployment, name, 1500)
     if artifacts:
         (artifacts / f"{name}.log").write_text(logs)
     summary_text = stream_text = ""
@@ -474,14 +578,14 @@ HELLO = {
 
 def do_benchmark(project_root: Path, scratch: Path, output: Path) -> int:
     write_stream(output, [HELLO])
-    artifacts = Path(os.environ["VIBESYS_ARTIFACTS_DIR"]) if os.environ.get("VIBESYS_ARTIFACTS_DIR") else None
+    artifacts = artifacts_dir()
     try:
         deployment = Deployment(scratch)
         atexit.register(deployment.delete)
         sweep_stale_namespaces()
         hotel_image = build_hotel_image(project_root)
         loadgen_image = build_loadgen_image(scratch)
-        deployment.create(hotel_image)
+        deployment.create(hotel_image, loadgen_image, artifacts)
         deployment.start_forward()
         deployment.wait_ready()
         closed = run_phase(deployment, loadgen_image, "closed", artifacts)

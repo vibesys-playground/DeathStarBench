@@ -1,10 +1,11 @@
 # Image every hotel-k8s job runs in. Built with the task directory as context.
 #
-# Holds kubectl, buildctl, Go, Python 3, and two prebuilt binaries made from the
-# task's evaluator/ module: loadgen (the load generator; also baked into the
-# in-cluster load-generator image) and hotel-correctness (the Go semantic
-# oracle). Both build against the generic servicebench engine from a clone of
-# the vibesys repository at a pinned commit.
+# Holds kubectl, buildctl, Go, Python 3, and three prebuilt binaries made from
+# the task's evaluator/ module: loadgen (the load generator), seed (writes the
+# task's dataset into MongoDB) and hotel-correctness (the Go semantic oracle).
+# run.py bakes loadgen and seed into the in-cluster evaluator image. The module
+# builds against the generic servicebench engine from a clone of the vibesys
+# repository at a pinned commit.
 
 ARG VIBESYS_COMMIT=de037943cb6a8e6e73d00e8bc19fa53570558583
 
@@ -19,6 +20,7 @@ ENV CGO_ENABLED=0 GOFLAGS=-trimpath
 COPY evaluator/ /build/evaluator/
 RUN cd /build/evaluator \
  && go build -o /out/loadgen ./cmd/loadgen \
+ && go build -o /out/seed ./cmd/seed \
  && go build -o /out/hotel-correctness ./cmd/hotel-correctness
 
 FROM moby/buildkit:v0.22.0@sha256:832fa7aa1eb3deb56fa62ae933bfa42dad9a83ff4824dbbaf173b49c722b59d0 AS buildkit
@@ -32,7 +34,7 @@ RUN curl -fsSL -o /usr/local/bin/kubectl https://dl.k8s.io/release/v1.34.0/bin/l
  && echo "cfda68cba5848bc3b6c6135ae2f20ba2c78de20059f68789c090166d6abc3e2c  /usr/local/bin/kubectl" | sha256sum -c - \
  && chmod 0755 /usr/local/bin/kubectl
 COPY --from=buildkit /usr/bin/buildctl /usr/local/bin/buildctl
-COPY --from=build /out/loadgen /out/hotel-correctness /opt/vibesys/bin/
+COPY --from=build /out/loadgen /out/seed /out/hotel-correctness /opt/vibesys/bin/
 # See image/bwrap: the oracle's lifecycle needs a bwrap; a job container cannot run the real one.
 COPY --chmod=0755 image/bwrap /opt/vibesys/bin/bwrap
 ENV PATH=/opt/vibesys/bin:$PATH PYTHONDONTWRITEBYTECODE=1
