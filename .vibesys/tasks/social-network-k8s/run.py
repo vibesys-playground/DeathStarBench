@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import base64
 import calendar
 import hashlib
 import itertools
@@ -65,11 +66,13 @@ FRONTEND_SERVICE = "nginx-thrift"
 FRONTEND_PORT = 8080
 FRONTEND_URL = f"http://{FRONTEND_SERVICE}:{FRONTEND_PORT}"
 # Probes that must answer 200 through nginx-thrift before the deployment is ready.
-# They reach nginx, user-timeline (MongoDB, Redis), home-timeline (Redis), post-storage.
+# They reach nginx, user-timeline (MongoDB, Redis), home-timeline (Redis), post-storage,
+# for a user id far from the dataset's (so the probes leave its caches alone).
+PROBE_USER = 1999999999
 PROBE_PATHS = [
     "/",
-    "/wrk2-api/user-timeline/read?user_id=1&start=0&stop=1",
-    "/wrk2-api/home-timeline/read?user_id=1&start=0&stop=1",
+    f"/wrk2-api/user-timeline/read?user_id={PROBE_USER}&start=0&stop=1",
+    f"/wrk2-api/home-timeline/read?user_id={PROBE_USER}&start=0&stop=1",
 ]
 # Stateless Deployments the checker may restart one pod of, and the cache tiers it may
 # flush. home-timeline-redis is not a cache: it is the only store of home timelines.
@@ -90,6 +93,9 @@ SEED_TIMEOUT_SECONDS = 1200
 READY_TIMEOUT_SECONDS = 300.0
 # The open-loop phase offers this fraction of the sample's closed-loop throughput.
 OPEN_LOOP_LOAD_FRACTION = 0.7
+# The open phase replays the closed phase's writes (--state-out / --state-in), so it
+# can validate timelines exactly on the same deployment.
+STATE_JOURNAL = False  # BRING-UP: servicebench's bundled adapter has no journal
 
 
 class JobError(Exception):
@@ -362,7 +368,7 @@ class Deployment:
         self.created = False
         self.forwarder: Forwarder | None = None
 
-    def create(self, image: str) -> None:
+    def create(self, image: str, evaluator_image: str, artifacts: Path | None) -> None:
         self.created = True  # even a half-created namespace must be deleted
         self.kube.kubectl("create", "namespace", self.name, namespaced=False)
         self.kube.kubectl(
@@ -380,7 +386,11 @@ class Deployment:
             "wait", "--for=condition=Available", "deployment", "-l", "tier=data",
             "--timeout=300s", timeout=330,
         )
-        log(f"data tier available after {time.monotonic() - started:.0f}s; deploying the application")
+        log(f"data tier available after {time.monotonic() - started:.0f}s")
+        # The dataset is written into the data tier before any request reaches the
+        # application (the services read what they find).
+        seed_dataset(self, evaluator_image, artifacts)
+        log("deploying the application")
         self.kube.kubectl("apply", "-f", "-", input_text=services)
         result = self.kube.kubectl(
             "wait", "--for=condition=Available", "deployment", "--all", "--timeout=300s",
@@ -587,14 +597,30 @@ spec:
         command: ["sh", "-c"]
         args:
         - |
-          loadgen --mode benchmark --workload /workload/{workload}.toml \\
+          {prelude}loadgen --mode benchmark --workload /workload/{workload}.toml \\
             --base-url {url} --startup-timeout 120 --seed {seed} --fixture-seed {fixture_seed}{extra} \\
             --output-json /tmp/summary.json --vs-output /tmp/stream.jsonl
           rc=$?
           echo "::summary::"; cat /tmp/summary.json 2>/dev/null
           echo "::stream::"; cat /tmp/stream.jsonl 2>/dev/null
-          exit $rc
+          echo "::state::"; [ -f /tmp/state.out ] && base64 /tmp/state.out
+          echo "::end::"
+          exit $rc{mounts}
 """
+
+# The closed phase's write journal (loadgen --state-out) reaches the open phase's Job
+# (--state-in) as ConfigMaps of at most this many bytes each (the API limit is 1 MiB).
+STATE_CHUNK_BYTES = 700 * 1024
+STATE_MOUNTS = """
+        volumeMounts:
+        - name: state
+          mountPath: /state
+          readOnly: true
+      volumes:
+      - name: state
+        projected:
+          sources:
+{sources}"""
 
 SEED_JOB = """\
 apiVersion: batch/v1
@@ -616,7 +642,7 @@ spec:
         resources:
           requests: {{cpu: "{cpu}", memory: {memory}}}
           limits: {{cpu: "{cpu}", memory: {memory}}}
-        command: ["seed", "--base-url", "{url}"]
+        command: ["seed", "--timeout", "{timeout}s"]
 """
 
 
@@ -643,16 +669,16 @@ def wait_job(deployment: Deployment, name: str, timeout: float) -> tuple[bool, s
 
 
 def seed_dataset(deployment: Deployment, image: str, artifacts: Path | None) -> dict | None:
-    """Write the task's dataset through the public API (Job "seed")."""
+    """Write the task's dataset directly into the data tier (Job "seed")."""
     if not shutil.which("seed"):
         log("BRING-UP: no seed binary in the job image; the deployment starts empty")
         return None
     log("seeding the task's dataset: starting Job seed")
     started = time.monotonic()
     deployment.kube.kubectl("apply", "-f", "-", input_text=SEED_JOB.format(
-        image=image, cpu=SEED_CPU, memory=SEED_MEMORY, url=FRONTEND_URL,
+        image=image, cpu=SEED_CPU, memory=SEED_MEMORY, timeout=SEED_TIMEOUT_SECONDS,
     ))
-    succeeded, logs = wait_job(deployment, "seed", SEED_TIMEOUT_SECONDS)
+    succeeded, logs = wait_job(deployment, "seed", SEED_TIMEOUT_SECONDS + 60)
     seconds = time.monotonic() - started
     if artifacts:
         (artifacts / "seed.log").write_text(logs)
@@ -679,33 +705,72 @@ def draw_seeds() -> dict:
     return {"seed": secrets.randbelow(2**31), "fixture_seed": secrets.randbelow(2**31)}
 
 
-def run_phase(deployment: Deployment, image: str, workload: str, artifacts: Path | None,
-              seeds: dict, rate: float | None = None) -> dict:
-    """Run one load-generator Job in the namespace; return its protocol-2 result values.
+def put_state(deployment: Deployment, state: bytes) -> str:
+    """Store a write journal as ConfigMaps; return the Job's projected-volume sources."""
+    sources = []
+    for index in range(0, max(len(state), 1), STATE_CHUNK_BYTES):
+        part = f"loadgen-state-{index // STATE_CHUNK_BYTES:02d}"
+        path = scratch_file(deployment, part)
+        path.write_bytes(state[index:index + STATE_CHUNK_BYTES])
+        deployment.kube.kubectl("create", "configmap", part, f"--from-file=part={path}")
+        sources.append(f"          - configMap:\n              name: {part}\n"
+                       f"              items: [{{key: part, path: {part}}}]")
+    return "\n".join(sources)
 
-    rate, when given, overrides the workload's offered rate (operations/s).
+
+def scratch_file(deployment: Deployment, name: str) -> Path:
+    return deployment.scratch / name
+
+
+def run_phase(deployment: Deployment, image: str, workload: str, artifacts: Path | None,
+              seeds: dict, rate: float | None = None, state_in: bytes | None = None,
+              state_out: bool = False) -> tuple[dict, bytes | None]:
+    """Run one load-generator Job in the namespace.
+
+    Returns its protocol-2 result values and, with state_out, the write journal the
+    load generator left (to replay in a later phase with state_in). rate, when given,
+    overrides the workload's offered rate (operations/s).
     """
     name = f"loadgen-{workload}"
     extra = f" --rate {rate:.2f}" if rate is not None else ""
+    prelude = mounts = ""
+    if state_out:
+        extra += " --state-out /tmp/state.out"
+    if state_in is not None:
+        mounts = STATE_MOUNTS.format(sources=put_state(deployment, state_in))
+        prelude = "cat /state/loadgen-state-* > /tmp/state.in || exit 1\n          "
+        extra += " --state-in /tmp/state.in"
     log(f"phase {workload}: starting Job {name} (seed {seeds['seed']}, fixture seed "
         f"{seeds['fixture_seed']})" + (f" at {rate:.2f} ops/s" if rate is not None else ""))
     manifest = LOADGEN_JOB.format(
         name=name, image=image, cpu=LOADGEN_CPU, memory=LOADGEN_MEMORY, workload=workload,
         url=FRONTEND_URL, extra=extra, seed=seeds["seed"], fixture_seed=seeds["fixture_seed"],
+        prelude=prelude, mounts=mounts,
     )
     deployment.kube.kubectl("apply", "-f", "-", input_text=manifest)
     _, logs = wait_job(deployment, name, 1500)
-    if artifacts:
-        (artifacts / f"{name}.log").write_text(logs)
-    if "::summary::" in logs and "::stream::" in logs:
-        head, _, stream_text = logs.partition("::stream::")
+    if "::summary::" in logs and "::stream::" in logs and "::state::" in logs:
+        head, _, rest = logs.partition("::stream::")
+        stream_text, _, state_text = rest.partition("::state::")
+        state_text = state_text.partition("::end::")[0]
         summary_text = head.partition("::summary::")[2]
         log(f"phase {workload} loadgen output:\n" + head.partition("::summary::")[0][-1500:])
     else:
+        if artifacts:
+            (artifacts / f"{name}.log").write_text(logs)
         raise JobError(f"Job {name} produced no result stream; log tail:\n{logs[-1500:]}")
+    state = None
+    if state_out:
+        encoded = "".join(state_text.split())
+        if not encoded:
+            raise JobError(f"phase {workload} left no write journal (--state-out)")
+        state = base64.b64decode(encoded)
     if artifacts:
+        (artifacts / f"{name}.log").write_text(logs.partition("::summary::")[0])
         (artifacts / f"{name}.summary.json").write_text(summary_text)
         (artifacts / f"{name}.stream.jsonl").write_text(stream_text)
+        if state is not None:
+            (artifacts / f"{name}.state.gz").write_bytes(state)
     values = None
     for line in stream_text.splitlines():
         line = line.strip()
@@ -718,7 +783,7 @@ def run_phase(deployment: Deployment, image: str, workload: str, artifacts: Path
             values = record["values"]
     if values is None:
         raise JobError(f"phase {workload} wrote no result record")
-    return values
+    return values, state
 
 
 def write_stream(path: Path, records: list[dict]) -> None:
@@ -743,13 +808,12 @@ def prepare(project_root: Path, scratch: Path, artifacts: Path | None) -> tuple[
     image = build_candidate_image(project_root, artifacts)
     evaluator_image = build_evaluator_image(scratch)
     try:
-        deployment.create(image)
+        deployment.create(image, evaluator_image, artifacts)
         deployment.start_forward()
         deployment.wait_ready()
     except JobError:
         deployment.save_pods(artifacts, "pods.txt")
         raise
-    seed_dataset(deployment, evaluator_image, artifacts)
     return deployment, evaluator_image
 
 
@@ -782,7 +846,8 @@ def do_benchmark(project_root: Path, scratch: Path, output: Path) -> int:
         seeds = {"closed": draw_seeds(), "open": draw_seeds()}
         if artifacts:
             (artifacts / "seeds.json").write_text(json.dumps(seeds, indent=2) + "\n")
-        closed = run_phase(deployment, evaluator_image, "closed", artifacts, seeds["closed"])
+        closed, journal = run_phase(deployment, evaluator_image, "closed", artifacts,
+                                    seeds["closed"], state_out=STATE_JOURNAL)
         throughput = closed["operations_per_second"]
         # p99 is measured at a fixed fraction of this sample's own closed-loop
         # throughput, so a faster candidate is held to proportionally more load.
@@ -793,8 +858,8 @@ def do_benchmark(project_root: Path, scratch: Path, output: Path) -> int:
                 "open_loop_load_fraction": OPEN_LOOP_LOAD_FRACTION,
                 "open_loop_offered_operations_per_second": offered,
             }) + "\n")
-        open_loop = run_phase(deployment, evaluator_image, "open", artifacts, seeds["open"],
-                              rate=offered)
+        open_loop, _ = run_phase(deployment, evaluator_image, "open", artifacts, seeds["open"],
+                                 rate=offered, state_in=journal)
         p99 = open_loop["latency_ms.p99"]
         deployment.save_pods(artifacts, "pods.txt")
         log(f"closed loop: {throughput:.1f} ops/s; open loop at {offered:.1f} ops/s "

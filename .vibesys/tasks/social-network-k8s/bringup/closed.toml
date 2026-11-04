@@ -7,11 +7,11 @@ application = "social-network"
 [load]
 model = "closed_loop"
 rate = 0
-duration_seconds = 20
+duration_seconds = 40
 warmup_seconds = 10
 concurrency = 32
 timeout_seconds = 10
-repetitions = 2
+repetitions = 1
 seed = 42
 fixture_seed = 42
 min_offered_rate_ratio = 0.95
