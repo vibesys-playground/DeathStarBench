@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"reflect"
 	"sort"
+	"time"
 
 	hotelsupport "vibesys/hotel-k8s-evaluator/internal/appsupport/hotel"
+	"vibesys/hotel-k8s-evaluator/internal/dataset"
 	"vibesys/microservice-evaluator/api"
 )
 
@@ -31,17 +33,35 @@ func (a *Application) ValidateOperation(
 	if state.kind != operation.Name {
 		return invalid("invalid_plan", fmt.Sprintf("plan kind %q does not match operation %q", state.kind, operation.Name))
 	}
-	wantResults := 1
-	if operation.Name == operationReserveCapacity {
-		wantResults = 2
+	if len(results) != len(plan.Invocations) {
+		return invalid("result_count", fmt.Sprintf("got %d protocol results, want %d", len(results), len(plan.Invocations)))
 	}
-	if len(results) != wantResults {
-		return invalid("result_count", fmt.Sprintf("got %d protocol results, want %d", len(results), wantResults))
-	}
+	end := time.Now()
 
 	switch operation.Name {
 	case operationSearch, operationRecommendDistance, operationRecommendRate, operationRecommendPrice:
-		return validateGeoJSON(results[0], state.expectedIDs)
+		profiles := a.profilesAt(state.built, end, state.sandbox)
+		if state.sandbox != nil {
+			return a.validateSandbox(operation.Name, plan, results[0], state, end, profiles)
+		}
+		return validateFeatures(results[0], exactSet(state.expectedIDs), profiles)
+	case operationRates:
+		return a.validateRates(results[0], state.hotel, state.built, end)
+	case operationUpdateRate, operationUpdateProfile, operationSetCapacity, operationAddHotel:
+		validation := api.ValidationResult{Success: true}
+		for index, message := range state.messages {
+			if validation = validateMessage(results[index], message); !validation.Success {
+				validation.ErrorMessage = fmt.Sprintf("step %d: %s", index+1, validation.ErrorMessage)
+				break
+			}
+		}
+		if state.finish != nil {
+			// The write was acknowledged if its first step answered 200
+			// with the expected message.
+			state.finish(end, validateMessage(results[0], state.messages[0]).Success)
+			state.finish = nil
+		}
+		return validation
 	case operationLoginValid:
 		return validateMessage(results[0], loginSuccess)
 	case operationLoginInvalid:
@@ -83,10 +103,64 @@ func validateMessage(result api.ProtocolResult, expected string) api.ValidationR
 	return api.ValidationResult{Success: true}
 }
 
-func validateGeoJSON(
-	result api.ProtocolResult,
-	expectedIDs []string,
-) api.ValidationResult {
+// validateGeoJSON checks a GeoJSON answer of seeded hotels that no write
+// changed: exactly expectedIDs, with their seeded profiles.
+func validateGeoJSON(result api.ProtocolResult, expectedIDs []string) api.ValidationResult {
+	return validateFeatures(result, exactSet(expectedIDs), seededProfiles)
+}
+
+// profileSource returns the hotel with an ID and the profiles a response may
+// show for it.
+type profileSource func(id string) (*dataset.Hotel, []hotelsupport.Profile, bool)
+
+func seededProfiles(id string) (*dataset.Hotel, []hotelsupport.Profile, bool) {
+	hotel, ok := hotelsupport.DefaultReference().Hotel(id)
+	if !ok {
+		return nil, nil, false
+	}
+	return hotel, []hotelsupport.Profile{{Name: hotel.Name, Phone: hotel.Phone}}, true
+}
+
+// profilesAt is the profile source for a read built at start and validated
+// at end: seeded hotels with the profiles the writes allow, and the
+// additions of the trial whose sandbox the read queries.
+func (a *Application) profilesAt(start, end time.Time, sandbox *fixture) profileSource {
+	reference := a.reference
+	return func(id string) (*dataset.Hotel, []hotelsupport.Profile, bool) {
+		if hotel, ok := reference.Hotel(id); ok {
+			return hotel, a.writes.allowedProfiles(hotel, start, end), true
+		}
+		if sandbox != nil {
+			required, optional := a.writes.additionsAt(sandbox, start, end)
+			for _, hotel := range append(required, optional...) {
+				if hotel.ID == id {
+					return hotel, []hotelsupport.Profile{{Name: hotel.Name, Phone: hotel.Phone}}, true
+				}
+			}
+		}
+		return nil, nil, false
+	}
+}
+
+// exactSet accepts exactly one set of hotel IDs.
+func exactSet(expectedIDs []string) func([]string) error {
+	want := append([]string(nil), expectedIDs...)
+	sort.Strings(want)
+	return func(actual []string) error {
+		if len(actual) != len(want) {
+			return fmt.Errorf("GeoJSON has %d features, want exactly %d", len(actual), len(want))
+		}
+		if !reflect.DeepEqual(actual, want) {
+			return fmt.Errorf("hotel IDs %v, want exact set %v", actual, want)
+		}
+		return nil
+	}
+}
+
+// validateFeatures checks a GeoJSON FeatureCollection strictly: its schema,
+// each feature's profile (one the source allows) and float32 coordinates,
+// no duplicates, and the sorted set of IDs with accept.
+func validateFeatures(result api.ProtocolResult, accept func(sortedIDs []string) error, profiles profileSource) api.ValidationResult {
 	value, validation := decodeHTTPJSON(result)
 	if !validation.Success {
 		return validation
@@ -105,16 +179,10 @@ func validateGeoJSON(
 	if !ok {
 		return invalid("response_schema", "GeoJSON features must be an array")
 	}
-	if len(features) != len(expectedIDs) {
-		return invalid(
-			"response_value",
-			fmt.Sprintf("GeoJSON has %d features, want exactly %d", len(features), len(expectedIDs)),
-		)
-	}
 	seen := make(map[string]struct{}, len(features))
 	actualIDs := make([]string, 0, len(features))
 	for index, raw := range features {
-		id, err := validateFeature(raw)
+		id, err := validateFeature(raw, profiles)
 		if err != nil {
 			return invalid("response_schema", fmt.Sprintf("feature %d: %v", index, err))
 		}
@@ -125,15 +193,13 @@ func validateGeoJSON(
 		actualIDs = append(actualIDs, id)
 	}
 	sort.Strings(actualIDs)
-	want := append([]string(nil), expectedIDs...)
-	sort.Strings(want)
-	if !reflect.DeepEqual(actualIDs, want) {
-		return invalid("response_value", fmt.Sprintf("hotel IDs %v, want exact set %v", actualIDs, want))
+	if err := accept(actualIDs); err != nil {
+		return invalid("response_value", err.Error())
 	}
 	return api.ValidationResult{Success: true}
 }
 
-func validateFeature(raw any) (string, error) {
+func validateFeature(raw any, profiles profileSource) (string, error) {
 	feature, ok := raw.(map[string]any)
 	if !ok {
 		return "", fmt.Errorf("must be an object, got %T", raw)
@@ -148,7 +214,7 @@ func validateFeature(raw any) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("id must be a string")
 	}
-	expected, ok := hotelsupport.DefaultReference().Hotel(id)
+	expected, allowed, ok := profiles(id)
 	if !ok {
 		return "", fmt.Errorf("unknown Hotel profile ID %q", id)
 	}
@@ -159,8 +225,12 @@ func validateFeature(raw any) (string, error) {
 	if keys := sortedKeys(properties); !reflect.DeepEqual(keys, []string{"name", "phone_number"}) {
 		return "", fmt.Errorf("property fields %v, want [name phone_number]", keys)
 	}
-	if properties["name"] != expected.Name || properties["phone_number"] != expected.Phone {
-		return "", fmt.Errorf("properties %v do not match catalog for hotel %s", properties, id)
+	matched := false
+	for _, profile := range allowed {
+		matched = matched || (properties["name"] == profile.Name && properties["phone_number"] == profile.Phone)
+	}
+	if !matched {
+		return "", fmt.Errorf("properties %v of hotel %s are none of the allowed profiles %v", properties, id, allowed)
 	}
 	geometry, ok := feature["geometry"].(map[string]any)
 	if !ok {

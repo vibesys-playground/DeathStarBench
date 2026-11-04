@@ -23,8 +23,13 @@ import (
 //     uniform over the rate window such that the stay ends inside it.
 //   - Logins: a user by Zipf rank (exponent 0.75) over the user list.
 //   - Reservations: a hotel by popularity, a city by Zipf rank then a hotel
-//     by Zipf rank (exponent 0.75) within the city, on a trial-owned future
+//     by Zipf rank (exponent 0.75) within the city, outside the quarter of
+//     capacity-managed hotels (capacityManaged), on a trial-owned future
 //     night; a user as for logins.
+//   - Rate reads and admin writes: a hotel by popularity as for
+//     reservations (writes.go). Write plans skip items with a write in
+//     flight and sandbox reads depend on the additions acknowledged so far,
+//     so those draws also depend on timing.
 const (
 	coordinateDecimals = 5
 	// searchAttempts bounds redraws of a location where the geo service's own
@@ -65,14 +70,37 @@ func (a *Application) BuildOperation(
 	}
 	switch operation.Name {
 	case operationSearch:
+		if lat, lon, ok := a.sandboxLocation(sample.Random, data); ok {
+			inDate, outDate := stay(sample.Random)
+			return sandboxPlan(operation, api.HTTPRequestSpec{Method: http.MethodGet, Path: "/hotels", Query: map[string]string{
+				"inDate": inDate, "outDate": outDate, "lat": lat, "lon": lon,
+			}}, data), nil
+		}
 		request, expectedIDs, err := a.searchRequest(sample.Random)
 		if err != nil {
 			return api.OperationPlan{}, err
 		}
 		return oneRequestPlan(operation, request, expectedIDs), nil
 	case operationRecommendDistance, operationRecommendRate, operationRecommendPrice:
+		if operation.Name == operationRecommendDistance {
+			if lat, lon, ok := a.sandboxLocation(sample.Random, data); ok {
+				return sandboxPlan(operation, api.HTTPRequestSpec{Method: http.MethodGet, Path: "/recommendations", Query: map[string]string{
+					"require": "dis", "lat": lat, "lon": lon,
+				}}, data), nil
+			}
+		}
 		request, expectedIDs := a.recommendationRequest(operation.Name, sample.Random)
 		return oneRequestPlan(operation, request, expectedIDs), nil
+	case operationRates:
+		return a.ratesPlan(operation, sample), nil
+	case operationUpdateRate:
+		return a.rateWritePlan(operation, sample)
+	case operationUpdateProfile:
+		return a.profileWritePlan(operation, sample)
+	case operationSetCapacity:
+		return a.capacityWritePlan(operation, sample, data)
+	case operationAddHotel:
+		return a.addHotelPlan(operation, sample, data)
 	case operationLoginValid, operationLoginInvalid:
 		return a.loginPlan(operation, sample), nil
 	case operationReserveCapacity:
@@ -92,8 +120,17 @@ func oneRequestPlan(
 			Target: operation.Target, Operation: operation.Name, Payload: request,
 		}},
 		State: &operationState{
-			kind: operation.Name, expectedIDs: append([]string(nil), expectedIDs...),
+			kind: operation.Name, expectedIDs: append([]string(nil), expectedIDs...), built: time.Now(),
 		},
+	}
+}
+
+// sandboxPlan is a search or distance recommendation in the trial's
+// sandbox, validated against the trial's additions.
+func sandboxPlan(operation api.Operation, request api.HTTPRequestSpec, data *fixture) api.OperationPlan {
+	return api.OperationPlan{
+		Invocations: []api.Invocation{{Target: operation.Target, Operation: operation.Name, Payload: request}},
+		State:       &operationState{kind: operation.Name, built: time.Now(), sandbox: data},
 	}
 }
 
@@ -241,7 +278,7 @@ func (a *Application) reservationPlan(
 	hotelIndex := -1
 	for attempt := uint64(0); attempt < reservationAttempts && hotelIndex < 0; attempt++ {
 		city, rank := a.popularHotel(sample.Random, attempt)
-		if candidate := a.reference.Data.Cities[city].Hotels[rank]; !data.isUsed(candidate) {
+		if candidate := a.reference.Data.Cities[city].Hotels[rank]; !data.isUsed(candidate) && !capacityManaged(candidate) {
 			hotelIndex = candidate
 		}
 	}
@@ -252,7 +289,7 @@ func (a *Application) reservationPlan(
 		city, rank := a.popularHotel(sample.Random, 0)
 		hotels := a.reference.Data.Cities[city].Hotels
 		for offset := 1; offset <= len(hotels) && hotelIndex < 0; offset++ {
-			if candidate := hotels[(rank+offset)%len(hotels)]; !data.isUsed(candidate) {
+			if candidate := hotels[(rank+offset)%len(hotels)]; !data.isUsed(candidate) && !capacityManaged(candidate) {
 				hotelIndex = candidate
 			}
 		}
@@ -281,13 +318,21 @@ func (a *Application) reservationPlan(
 			{Target: operation.Target, Operation: operation.Name, Payload: request(hotel.Capacity)},
 			{Target: operation.Target, Operation: operation.Name, Payload: request(1)},
 		},
-		State: &operationState{kind: operation.Name, release: release},
+		State: &operationState{kind: operation.Name, release: release, built: time.Now()},
 	}, nil
 }
 
 func (a *Application) FinishOperation(plan api.OperationPlan) {
 	state, ok := plan.State.(*operationState)
-	if ok && state != nil && state.release != nil {
+	if !ok || state == nil {
+		return
+	}
+	if state.finish != nil {
+		// A write that was not validated may still have been applied.
+		state.finish(time.Now(), false)
+		state.finish = nil
+	}
+	if state.release != nil {
 		state.release()
 		state.release = nil
 	}

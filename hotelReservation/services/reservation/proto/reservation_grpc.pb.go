@@ -21,6 +21,8 @@ const _ = grpc.SupportPackageIsVersion7
 const (
 	Reservation_MakeReservation_FullMethodName   = "/reservation.Reservation/MakeReservation"
 	Reservation_CheckAvailability_FullMethodName = "/reservation.Reservation/CheckAvailability"
+	Reservation_SetCapacity_FullMethodName       = "/reservation.Reservation/SetCapacity"
+	Reservation_AddCapacity_FullMethodName       = "/reservation.Reservation/AddCapacity"
 )
 
 // ReservationClient is the client API for Reservation service.
@@ -31,6 +33,11 @@ type ReservationClient interface {
 	MakeReservation(ctx context.Context, in *Request, opts ...grpc.CallOption) (*Result, error)
 	// CheckAvailability checks if given information is available
 	CheckAvailability(ctx context.Context, in *Request, opts ...grpc.CallOption) (*Result, error)
+	// SetCapacity sets a hotel's number of rooms (NOT_FOUND for an unknown
+	// hotel, FAILED_PRECONDITION if a night already holds more reserved rooms).
+	SetCapacity(ctx context.Context, in *CapacityRequest, opts ...grpc.CallOption) (*CapacityResult, error)
+	// AddCapacity stores the number of rooms of a new hotel.
+	AddCapacity(ctx context.Context, in *CapacityRequest, opts ...grpc.CallOption) (*CapacityResult, error)
 }
 
 type reservationClient struct {
@@ -59,6 +66,24 @@ func (c *reservationClient) CheckAvailability(ctx context.Context, in *Request, 
 	return out, nil
 }
 
+func (c *reservationClient) SetCapacity(ctx context.Context, in *CapacityRequest, opts ...grpc.CallOption) (*CapacityResult, error) {
+	out := new(CapacityResult)
+	err := c.cc.Invoke(ctx, Reservation_SetCapacity_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *reservationClient) AddCapacity(ctx context.Context, in *CapacityRequest, opts ...grpc.CallOption) (*CapacityResult, error) {
+	out := new(CapacityResult)
+	err := c.cc.Invoke(ctx, Reservation_AddCapacity_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ReservationServer is the server API for Reservation service.
 // All implementations must embed UnimplementedReservationServer
 // for forward compatibility
@@ -67,6 +92,11 @@ type ReservationServer interface {
 	MakeReservation(context.Context, *Request) (*Result, error)
 	// CheckAvailability checks if given information is available
 	CheckAvailability(context.Context, *Request) (*Result, error)
+	// SetCapacity sets a hotel's number of rooms (NOT_FOUND for an unknown
+	// hotel, FAILED_PRECONDITION if a night already holds more reserved rooms).
+	SetCapacity(context.Context, *CapacityRequest) (*CapacityResult, error)
+	// AddCapacity stores the number of rooms of a new hotel.
+	AddCapacity(context.Context, *CapacityRequest) (*CapacityResult, error)
 	mustEmbedUnimplementedReservationServer()
 }
 
@@ -79,6 +109,12 @@ func (UnimplementedReservationServer) MakeReservation(context.Context, *Request)
 }
 func (UnimplementedReservationServer) CheckAvailability(context.Context, *Request) (*Result, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CheckAvailability not implemented")
+}
+func (UnimplementedReservationServer) SetCapacity(context.Context, *CapacityRequest) (*CapacityResult, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetCapacity not implemented")
+}
+func (UnimplementedReservationServer) AddCapacity(context.Context, *CapacityRequest) (*CapacityResult, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AddCapacity not implemented")
 }
 func (UnimplementedReservationServer) mustEmbedUnimplementedReservationServer() {}
 
@@ -129,6 +165,42 @@ func _Reservation_CheckAvailability_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Reservation_SetCapacity_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CapacityRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ReservationServer).SetCapacity(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Reservation_SetCapacity_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ReservationServer).SetCapacity(ctx, req.(*CapacityRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Reservation_AddCapacity_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CapacityRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ReservationServer).AddCapacity(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Reservation_AddCapacity_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ReservationServer).AddCapacity(ctx, req.(*CapacityRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Reservation_ServiceDesc is the grpc.ServiceDesc for Reservation service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -143,6 +215,14 @@ var Reservation_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CheckAvailability",
 			Handler:    _Reservation_CheckAvailability_Handler,
+		},
+		{
+			MethodName: "SetCapacity",
+			Handler:    _Reservation_SetCapacity_Handler,
+		},
+		{
+			MethodName: "AddCapacity",
+			Handler:    _Reservation_AddCapacity_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

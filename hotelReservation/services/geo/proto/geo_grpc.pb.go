@@ -19,7 +19,8 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	Geo_Nearby_FullMethodName = "/geo.Geo/Nearby"
+	Geo_Nearby_FullMethodName   = "/geo.Geo/Nearby"
+	Geo_AddHotel_FullMethodName = "/geo.Geo/AddHotel"
 )
 
 // GeoClient is the client API for Geo service.
@@ -28,6 +29,8 @@ const (
 type GeoClient interface {
 	// Finds the hotels contained nearby the current lat/lon.
 	Nearby(ctx context.Context, in *Request, opts ...grpc.CallOption) (*Result, error)
+	// AddHotel stores the location of a new hotel.
+	AddHotel(ctx context.Context, in *Point, opts ...grpc.CallOption) (*AddResult, error)
 }
 
 type geoClient struct {
@@ -47,12 +50,23 @@ func (c *geoClient) Nearby(ctx context.Context, in *Request, opts ...grpc.CallOp
 	return out, nil
 }
 
+func (c *geoClient) AddHotel(ctx context.Context, in *Point, opts ...grpc.CallOption) (*AddResult, error) {
+	out := new(AddResult)
+	err := c.cc.Invoke(ctx, Geo_AddHotel_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GeoServer is the server API for Geo service.
 // All implementations must embed UnimplementedGeoServer
 // for forward compatibility
 type GeoServer interface {
 	// Finds the hotels contained nearby the current lat/lon.
 	Nearby(context.Context, *Request) (*Result, error)
+	// AddHotel stores the location of a new hotel.
+	AddHotel(context.Context, *Point) (*AddResult, error)
 	mustEmbedUnimplementedGeoServer()
 }
 
@@ -62,6 +76,9 @@ type UnimplementedGeoServer struct {
 
 func (UnimplementedGeoServer) Nearby(context.Context, *Request) (*Result, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Nearby not implemented")
+}
+func (UnimplementedGeoServer) AddHotel(context.Context, *Point) (*AddResult, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AddHotel not implemented")
 }
 func (UnimplementedGeoServer) mustEmbedUnimplementedGeoServer() {}
 
@@ -94,6 +111,24 @@ func _Geo_Nearby_Handler(srv interface{}, ctx context.Context, dec func(interfac
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Geo_AddHotel_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Point)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GeoServer).AddHotel(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Geo_AddHotel_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GeoServer).AddHotel(ctx, req.(*Point))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Geo_ServiceDesc is the grpc.ServiceDesc for Geo service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -104,6 +139,10 @@ var Geo_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Nearby",
 			Handler:    _Geo_Nearby_Handler,
+		},
+		{
+			MethodName: "AddHotel",
+			Handler:    _Geo_AddHotel_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

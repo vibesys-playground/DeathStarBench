@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"sync"
 	"time"
 
+	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/changes"
 	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/registry"
 	pb "github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/services/recommendation/proto"
 	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/tls"
@@ -18,7 +20,9 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 )
 
 const name = "srv-recommendation"
@@ -27,6 +31,9 @@ const name = "srv-recommendation"
 type Server struct {
 	pb.UnimplementedRecommendationServer
 
+	// mu guards hotels, which the startup load, AddHotel and the refresh
+	// from MongoDB (changes.Watch) update while requests read it.
+	mu     sync.RWMutex
 	hotels map[string]Hotel
 	uuid   string
 
@@ -44,7 +51,9 @@ func (s *Server) Run() error {
 	}
 
 	if s.hotels == nil {
-		s.hotels = loadRecommendations(s.MongoClient)
+		if err := s.Load(); err != nil {
+			return err
+		}
 	}
 
 	s.uuid = uuid.New().String()
@@ -83,6 +92,22 @@ func (s *Server) Run() error {
 	return srv.Serve(lis)
 }
 
+// Load reads the catalog from MongoDB and keeps it current: it reads the
+// change counter first, so no addition is missed, then polls it.
+func (s *Server) Load() error {
+	database := s.MongoClient.Database("recommendation-db")
+	version, err := changes.Version(context.TODO(), database)
+	if err != nil {
+		return fmt.Errorf("read recommendation-db change counter: %v", err)
+	}
+	if err := changes.EnsureIndex(context.TODO(), database.Collection("recommendation")); err != nil {
+		return fmt.Errorf("index added hotels: %v", err)
+	}
+	s.hotels = loadRecommendations(s.MongoClient)
+	go changes.Watch(database, version, s.loadAdded)
+	return nil
+}
+
 // Shutdown cleans up any processes
 func (s *Server) Shutdown() {
 	s.Registry.Deregister(s.uuid)
@@ -93,6 +118,8 @@ func (s *Server) GetRecommendations(ctx context.Context, req *pb.Request) (*pb.R
 	res := new(pb.Result)
 	log.Trace().Msgf("GetRecommendations")
 	require := req.Require
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if require == "dis" {
 		p1 := &geoindex.GeoPoint{
 			Pid:  "",
@@ -156,13 +183,13 @@ func loadRecommendations(client *mongo.Client) map[string]Hotel {
 	collection := client.Database("recommendation-db").Collection("recommendation")
 	curr, err := collection.Find(context.TODO(), bson.D{})
 	if err != nil {
-		log.Error().Msgf("Failed get hotels data: ", err)
+		log.Error().Msgf("Failed get hotels data: %v", err)
 	}
 
 	var hotels []Hotel
 	curr.All(context.TODO(), &hotels)
 	if err != nil {
-		log.Error().Msgf("Failed get hotels data: ", err)
+		log.Error().Msgf("Failed get hotels data: %v", err)
 	}
 
 	profiles := make(map[string]Hotel)
@@ -179,4 +206,48 @@ type Hotel struct {
 	HLon   float64 `bson:"lon"`
 	HRate  float64 `bson:"rate"`
 	HPrice float64 `bson:"price"`
+}
+
+// AddHotel stores a new hotel's attributes in MongoDB and signals the other
+// replicas (changes.Bump), which add it to their lists.
+func (s *Server) AddHotel(ctx context.Context, req *pb.Hotel) (*pb.AddResult, error) {
+	if req.HotelId == "" {
+		return nil, status.Error(codes.InvalidArgument, "hotelId is required")
+	}
+	database := s.MongoClient.Database("recommendation-db")
+	_, err := database.Collection("recommendation").InsertOne(ctx, bson.D{
+		{Key: "hotelId", Value: req.HotelId}, {Key: "lat", Value: req.Lat}, {Key: "lon", Value: req.Lon},
+		{Key: "rate", Value: req.Rate}, {Key: "price", Value: req.Price}, {Key: changes.Added, Value: true},
+	})
+	if mongo.IsDuplicateKeyError(err) {
+		return nil, status.Errorf(codes.AlreadyExists, "hotel %s has recommendation attributes", req.HotelId)
+	}
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "insert recommendation attributes: %v", err)
+	}
+	if err := changes.Bump(ctx, database); err != nil {
+		return nil, status.Errorf(codes.Internal, "signal the change: %v", err)
+	}
+	s.mu.Lock()
+	s.hotels[req.HotelId] = Hotel{HId: req.HotelId, HLat: req.Lat, HLon: req.Lon, HRate: req.Rate, HPrice: req.Price}
+	s.mu.Unlock()
+	return &pb.AddResult{}, nil
+}
+
+// loadAdded puts every hotel added after seeding into the list.
+func (s *Server) loadAdded(ctx context.Context) error {
+	cursor, err := s.MongoClient.Database("recommendation-db").Collection("recommendation").Find(ctx, bson.D{{Key: changes.Added, Value: true}})
+	if err != nil {
+		return err
+	}
+	var hotels []Hotel
+	if err := cursor.All(ctx, &hotels); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, hotel := range hotels {
+		s.hotels[hotel.HId] = hotel
+	}
+	return nil
 }

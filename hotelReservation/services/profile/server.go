@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bradfitz/gomemcache/memcache"
+	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/lease"
 	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/registry"
 	pb "github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/services/profile/proto"
 	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/tls"
@@ -19,7 +20,9 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 )
 
 const name = "srv-profile"
@@ -116,6 +119,9 @@ func (s *Server) GetProfiles(ctx context.Context, req *pb.Request) (*pb.Result, 
 		log.Panic().Msgf("Tried to get hotelIds [%v], but got memmcached error = %s", hotelIds, err)
 	} else {
 		for hotelId, item := range resMap {
+			if lease.IsLease(item) {
+				continue // another request is filling it: a miss
+			}
 			profileStr := string(item.Value)
 			log.Trace().Msgf("memc hit with %v", profileStr)
 
@@ -128,7 +134,12 @@ func (s *Server) GetProfiles(ctx context.Context, req *pb.Request) (*pb.Result, 
 		wg.Add(len(profileMap))
 		for hotelId := range profileMap {
 			go func(hotelId string) {
+				defer wg.Done()
 				var hotelProf *pb.Hotel
+
+				// Take the fill lease before reading MongoDB, so a profile
+				// update between the read and the fill cannot be undone.
+				fill := lease.Acquire(s.MemcClient, hotelId)
 
 				collection := s.MongoClient.Database("profile-db").Collection("hotels")
 
@@ -138,7 +149,8 @@ func (s *Server) GetProfiles(ctx context.Context, req *pb.Request) (*pb.Result, 
 				mongoSpan.Finish()
 
 				if err != nil {
-					log.Error().Msgf("Failed get hotels data: ", err)
+					log.Error().Msgf("Failed get hotels data: %v", err)
+					return
 				}
 
 				mutex.Lock()
@@ -147,13 +159,12 @@ func (s *Server) GetProfiles(ctx context.Context, req *pb.Request) (*pb.Result, 
 
 				profJson, err := json.Marshal(hotelProf)
 				if err != nil {
-					log.Error().Msgf("Failed to marshal hotel [id: %v] with err:", hotelProf.Id, err)
+					log.Error().Msgf("Failed to marshal hotel [id: %v] with err: %v", hotelProf.Id, err)
+					return
 				}
-				memcStr := string(profJson)
 
 				// write to memcached
-				go s.MemcClient.Set(&memcache.Item{Key: hotelId, Value: []byte(memcStr)})
-				defer wg.Done()
+				go fill.Fill(profJson)
 			}(hotelId)
 		}
 	}
@@ -162,4 +173,78 @@ func (s *Server) GetProfiles(ctx context.Context, req *pb.Request) (*pb.Result, 
 	res.Hotels = hotels
 	log.Trace().Msgf("In GetProfiles after getting resp")
 	return res, nil
+}
+
+// UpdateProfile changes the given non-empty fields of a hotel's profile in
+// MongoDB, then invalidates the cached profile.
+func (s *Server) UpdateProfile(ctx context.Context, req *pb.UpdateRequest) (*pb.UpdateResult, error) {
+	fields := bson.D{}
+	if req.Name != "" {
+		fields = append(fields, bson.E{Key: "name", Value: req.Name})
+	}
+	if req.PhoneNumber != "" {
+		fields = append(fields, bson.E{Key: "phoneNumber", Value: req.PhoneNumber})
+	}
+	if req.HotelId == "" || len(fields) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "hotelId and a field to change are required")
+	}
+	collection := s.MongoClient.Database("profile-db").Collection("hotels")
+	result, err := collection.UpdateOne(ctx, bson.D{{Key: "id", Value: req.HotelId}}, bson.D{{Key: "$set", Value: fields}})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "update profile: %v", err)
+	}
+	if result.MatchedCount == 0 {
+		return nil, status.Errorf(codes.NotFound, "no hotel %s", req.HotelId)
+	}
+	if err := lease.Invalidate(s.MemcClient, req.HotelId); err != nil {
+		return nil, status.Errorf(codes.Unavailable, "invalidate cached profile: %v", err)
+	}
+	return &pb.UpdateResult{}, nil
+}
+
+// AddProfile stores the profile of a new hotel. The collection's unique
+// index on "id" rejects an ID that is taken.
+func (s *Server) AddProfile(ctx context.Context, req *pb.Hotel) (*pb.UpdateResult, error) {
+	if req.Id == "" || req.Address == nil {
+		return nil, status.Error(codes.InvalidArgument, "id and address are required")
+	}
+	collection := s.MongoClient.Database("profile-db").Collection("hotels")
+	_, err := collection.InsertOne(ctx, storedHotel{
+		Id: req.Id, Name: req.Name, PhoneNumber: req.PhoneNumber, Description: req.Description,
+		Address: &storedAddress{
+			StreetNumber: req.Address.StreetNumber, StreetName: req.Address.StreetName,
+			City: req.Address.City, State: req.Address.State, Country: req.Address.Country,
+			PostalCode: req.Address.PostalCode, Lat: req.Address.Lat, Lon: req.Address.Lon,
+		},
+	})
+	if mongo.IsDuplicateKeyError(err) {
+		return nil, status.Errorf(codes.AlreadyExists, "hotel %s exists", req.Id)
+	}
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "insert profile: %v", err)
+	}
+	if err := lease.Invalidate(s.MemcClient, req.Id); err != nil {
+		return nil, status.Errorf(codes.Unavailable, "invalidate cached profile: %v", err)
+	}
+	return &pb.UpdateResult{}, nil
+}
+
+// storedHotel is a profile-db.hotels document (cmd/profile/db.go Hotel).
+type storedHotel struct {
+	Id          string         `bson:"id"`
+	Name        string         `bson:"name"`
+	PhoneNumber string         `bson:"phoneNumber"`
+	Description string         `bson:"description"`
+	Address     *storedAddress `bson:"address"`
+}
+
+type storedAddress struct {
+	StreetNumber string  `bson:"streetNumber"`
+	StreetName   string  `bson:"streetName"`
+	City         string  `bson:"city"`
+	State        string  `bson:"state"`
+	Country      string  `bson:"country"`
+	PostalCode   string  `bson:"postalCode"`
+	Lat          float32 `bson:"lat"`
+	Lon          float32 `bson:"lon"`
 }

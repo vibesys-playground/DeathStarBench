@@ -56,6 +56,12 @@ func (a *Application) Properties() []api.AccuracyProperty {
 		{Name: "concurrent_isolation", Required: true},
 		{Name: "crash_recovery", Required: false},
 		{Name: "durable_capacity", Required: false},
+		{Name: "write_validation", Required: true},
+		{Name: "write_rate_visibility", Required: true},
+		{Name: "write_profile_visibility", Required: true},
+		{Name: "write_capacity", Required: true},
+		{Name: "write_hotel_addition", Required: true},
+		{Name: "durable_writes", Required: false},
 		// The remaining properties are violated by the pinned upstream
 		// implementation, so they are reported only when a workload opts in
 		// through application_config. See README.md for the counterexamples.

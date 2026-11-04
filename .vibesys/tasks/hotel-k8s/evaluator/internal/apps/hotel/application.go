@@ -34,6 +34,11 @@ var knownOperations = map[string]struct{}{
 	operationLoginValid:        {},
 	operationLoginInvalid:      {},
 	operationReserveCapacity:   {},
+	operationRates:             {},
+	operationUpdateRate:        {},
+	operationUpdateProfile:     {},
+	operationSetCapacity:       {},
+	operationAddHotel:          {},
 }
 
 type Config = hotelsupport.Config
@@ -53,6 +58,10 @@ type Application struct {
 	// capacity check and write are not transactional, so concurrent fill plans
 	// could both observe spare capacity and make the rejection oracle ambiguous.
 	reservationMu sync.Mutex
+
+	// writes records the admin writes of every trial (they outlive a trial
+	// until Reset restores them).
+	writes *writeModel
 }
 
 type fixture struct {
@@ -63,6 +72,11 @@ type fixture struct {
 	// reservation night and the hotels already reserved on it.
 	night uint64
 	used  map[int]struct{}
+
+	// sandbox is the trial's cell of the additions' region and tag marks its
+	// hotel IDs; added (guarded by writeModel.mu) are its additions.
+	sandbox, tag uint64
+	added        []*addition
 }
 
 func (f *fixture) isUsed(hotel int) bool {
@@ -102,7 +116,7 @@ func New(workload api.Workload) (api.Application, error) {
 	}
 	reference := hotelsupport.DefaultReference()
 	application := &Application{
-		config: config, seed: workload.Load.Seed, reference: reference,
+		config: config, seed: workload.Load.Seed, reference: reference, writes: newWriteModel(),
 		cities: dataset.NewZipf(len(reference.Data.Cities), dataset.ZipfOne),
 		users:  dataset.NewZipf(len(reference.Data.Users), dataset.ZipfThreeQuarters),
 	}
@@ -134,14 +148,12 @@ func (a *Application) Prepare(_ context.Context, _ api.Runtime, trial api.TrialC
 	rangeStart := time.Date(3000, time.January, 1, 12, 0, 0, 0, time.UTC)
 	const blocks = reservationCycles * 146097 / reservationBlockDays
 	block := (binary.BigEndian.Uint64(digest[:8]) + uint64(trial.Index)) % blocks
+	// Hotel additions go to a sandbox cell of the trial (fixture seed and
+	// index); two trials share a cell with probability 1/SandboxCount.
+	additions := sha256.Sum256([]byte(fmt.Sprintf("hotel-additions/%d/%d", trial.FixtureSeed, trial.Index)))
 	return &fixture{
 		dateBase: rangeStart.AddDate(0, 0, int(block)*reservationBlockDays),
+		sandbox:  binary.BigEndian.Uint64(additions[:8]),
+		tag:      binary.BigEndian.Uint64(additions[8:16]) >> 16,
 	}, nil
-}
-
-func (a *Application) Reset(context.Context, api.Runtime, api.TrialContext) error {
-	// DeathStarBench exposes no reservation deletion API. The fixture therefore
-	// gives every trial a separate namespace and every scheduled sample
-	// receives a unique date within that trial.
-	return nil
 }

@@ -52,10 +52,15 @@ func geoCellOf(lat, lon float64) geoCell {
 	}
 }
 
-func (g *geoIndex) appendCells(points []geoPoint, minX, maxX, minY, maxY int) []geoPoint {
+// appendCells appends the points of the cells in the rectangle, from g and
+// then from extra (points added to the index after g; nil for none).
+func (g *geoIndex) appendCells(points []geoPoint, extra *geoIndex, minX, maxX, minY, maxY int) []geoPoint {
 	for x := minX; x <= maxX; x++ {
 		for y := minY; y <= maxY; y++ {
 			points = append(points, g.cells[geoCell{x, y}]...)
+			if extra != nil {
+				points = append(points, extra.cells[geoCell{x, y}]...)
+			}
 		}
 	}
 	return points
@@ -66,18 +71,22 @@ func (g *geoIndex) appendCells(points []geoPoint, minX, maxX, minY, maxY int) []
 // false when two candidates tie on the ranking distance among the first k+1:
 // the library's unstable sort may then order them either way, so the set is
 // not determined.
-func (g *geoIndex) kNearest(lat, lon float64) (ids []string, exact bool) {
+//
+// extra holds points added after g was built (the index is the union); the
+// geo service adds a point to its cell like a loaded one, and only the order
+// within a cell, which matters only for ties, can differ.
+func (g *geoIndex) kNearest(lat, lon float64, extra *geoIndex) (ids []string, exact bool) {
 	k := geoMaxResults
 	query := geoPoint{lat: lat, lon: lon}
 	center := geoCellOf(lat, lon)
-	nearby := append([]geoPoint(nil), g.cells[center]...)
+	nearby := g.appendCells(nil, extra, center.x, center.x, center.y, center.y)
 	totalCount := 0
 	for d := 1; float64(d)*geoResolution <= geoCoarseDistance; d++ {
 		oldCount := len(nearby)
-		nearby = g.appendCells(nearby, center.x-d, center.x+d, center.y+d, center.y+d)
-		nearby = g.appendCells(nearby, center.x-d, center.x+d, center.y-d, center.y-d)
-		nearby = g.appendCells(nearby, center.x-d, center.x-d, center.y-d+1, center.y+d-1)
-		nearby = g.appendCells(nearby, center.x+d, center.x+d, center.y-d+1, center.y+d-1)
+		nearby = g.appendCells(nearby, extra, center.x-d, center.x+d, center.y+d, center.y+d)
+		nearby = g.appendCells(nearby, extra, center.x-d, center.x+d, center.y-d, center.y-d)
+		nearby = g.appendCells(nearby, extra, center.x-d, center.x-d, center.y-d+1, center.y+d-1)
+		nearby = g.appendCells(nearby, extra, center.x+d, center.x+d, center.y-d+1, center.y+d-1)
 		totalCount += len(nearby) - oldCount
 		if totalCount > k {
 			break

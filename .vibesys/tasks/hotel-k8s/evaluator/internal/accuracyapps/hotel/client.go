@@ -20,6 +20,11 @@ type client struct {
 func (c client) request(ctx context.Context, path string, query map[string]string) api.ProtocolResult {
 	spec := httpjson.MustRequest(http.MethodGet, path, nil, "")
 	spec.Query = query
+	return c.do(ctx, spec)
+}
+
+// do sends any request, such as a POST with a body.
+func (c client) do(ctx context.Context, spec api.HTTPRequestSpec) api.ProtocolResult {
 	requestContext, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	return c.runtime.Invoke(requestContext, api.Invocation{

@@ -25,44 +25,75 @@ session_policy = "reuse"
 [[operations]]
 name = "search_hotels"
 target = "gateway"
-weight = 600
+weight = 6000
 tags = ["read", "search"]
 
 [[operations]]
 name = "recommend_distance"
 target = "gateway"
-weight = 130
+weight = 1300
 tags = ["read", "recommendation"]
 
 [[operations]]
 name = "recommend_rate"
 target = "gateway"
-weight = 130
+weight = 1300
 tags = ["read", "recommendation"]
 
 [[operations]]
 name = "recommend_price"
 target = "gateway"
-weight = 130
+weight = 1300
 tags = ["read", "recommendation"]
 
 [[operations]]
 name = "login_valid"
 target = "gateway"
-weight = 3
+weight = 30
 tags = ["read", "authentication"]
 
 [[operations]]
 name = "login_invalid"
 target = "gateway"
-weight = 2
+weight = 20
 tags = ["read", "authentication"]
 
 [[operations]]
 name = "reserve_capacity"
 target = "gateway"
-weight = 5
+weight = 50
 tags = ["write", "read-your-write"]
+
+[[operations]]
+name = "hotel_rates"
+target = "gateway"
+weight = 400
+tags = ["read", "rates"]
+
+# Admin writes, about 1% of the mix (see evaluator/internal/apps/hotel/writes.go).
+[[operations]]
+name = "update_rate"
+target = "gateway"
+weight = 42
+tags = ["write", "admin"]
+
+[[operations]]
+name = "update_profile"
+target = "gateway"
+weight = 42
+tags = ["write", "admin"]
+
+[[operations]]
+name = "set_capacity"
+target = "gateway"
+weight = 12
+tags = ["write", "admin", "read-your-write"]
+
+[[operations]]
+name = "add_hotel"
+target = "gateway"
+weight = 8
+tags = ["write", "admin"]
 
 [objective]
 name = "p99_latency_ms"

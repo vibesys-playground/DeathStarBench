@@ -129,6 +129,12 @@ func ParseSearchCoordinate(text string) (float64, error) {
 // before availability: geo's nearest hotels that have rate plans. exact is
 // false when the geo service's own ordering is ambiguous for this location.
 func (r *Reference) SearchCandidates(latText, lonText string) (ids []string, exact bool, err error) {
+	return r.SearchCandidatesWith(latText, lonText, nil)
+}
+
+// SearchCandidatesWith is SearchCandidates over the dataset and the added
+// hotels (nil for none).
+func (r *Reference) SearchCandidatesWith(latText, lonText string, added *Additions) (ids []string, exact bool, err error) {
 	lat, err := ParseSearchCoordinate(latText)
 	if err != nil {
 		return nil, false, fmt.Errorf("parse search latitude %q: %w", latText, err)
@@ -137,10 +143,18 @@ func (r *Reference) SearchCandidates(latText, lonText string) (ids []string, exa
 	if err != nil {
 		return nil, false, fmt.Errorf("parse search longitude %q: %w", lonText, err)
 	}
-	nearby, exact := r.geo.kNearest(lat, lon)
+	var extra *geoIndex
+	if added != nil {
+		extra = added.index
+	}
+	nearby, exact := r.geo.kNearest(lat, lon, extra)
 	ids = nearby[:0:0]
 	for _, id := range nearby {
-		if hotel, ok := r.Hotel(id); ok && len(hotel.RatePlans) > 0 {
+		hotel, ok := r.Hotel(id)
+		if !ok && added != nil {
+			hotel, ok = added.byID[id]
+		}
+		if ok && len(hotel.RatePlans) > 0 {
 			ids = append(ids, id)
 		}
 	}
@@ -150,6 +164,36 @@ func (r *Reference) SearchCandidates(latText, lonText string) (ids []string, exa
 // NearestHotels is the "dis" recommendation: every hotel at the minimum of
 // geo distance / 1000 from the location (parsed as float64), over all hotels.
 func (r *Reference) NearestHotels(lat, lon float64) []string {
+	ids, _ := r.NearestHotelsDistance(lat, lon)
+	return ids
+}
+
+// NearestHotelsWith is NearestHotels over the dataset and the added hotels.
+func (r *Reference) NearestHotelsWith(lat, lon float64, added *Additions) []string {
+	ids, best := r.NearestHotelsDistance(lat, lon)
+	if added == nil {
+		return ids
+	}
+	for _, hotel := range added.hotels {
+		distance := RecommendDistanceKm(lat, lon, hotel)
+		switch {
+		case distance < best:
+			best, ids = distance, []string{hotel.ID}
+		case distance == best:
+			ids = append(ids, hotel.ID)
+		}
+	}
+	return ids
+}
+
+// RecommendDistanceKm is the recommendation service's distance from a query
+// location to a hotel: go-geoindex's haversine distance / 1000.
+func RecommendDistanceKm(lat, lon float64, hotel *dataset.Hotel) float64 {
+	return geoDistance(geoPoint{lat: lat, lon: lon}, geoPoint{lat: hotel.Lat, lon: hotel.Lon}) / 1000
+}
+
+// NearestHotelsDistance is NearestHotels and the distance of the answer.
+func (r *Reference) NearestHotelsDistance(lat, lon float64) ([]string, float64) {
 	query := geoPoint{lat: lat, lon: lon}
 	hotels := r.Data.Hotels
 	start := sort.Search(len(r.byLat), func(i int) bool { return hotels[r.byLat[i]].Lat >= lat })
@@ -187,7 +231,7 @@ func (r *Reference) NearestHotels(lat, lon float64) []string {
 			break
 		}
 	}
-	return ids
+	return ids, best
 }
 
 // BestRated is the "rate" recommendation: the hotels with the highest rating.
@@ -195,6 +239,76 @@ func (r *Reference) BestRated() []string { return append([]string(nil), r.bestRa
 
 // Cheapest is the "price" recommendation: the hotels with the lowest price.
 func (r *Reference) Cheapest() []string { return append([]string(nil), r.cheapest...) }
+
+// MaxRating and MinPrice are the seeded extremes that BestRated and
+// Cheapest answer.
+func (r *Reference) MaxRating() float64 { hotel, _ := r.Hotel(r.bestRated[0]); return hotel.Rating }
+func (r *Reference) MinPrice() float64  { hotel, _ := r.Hotel(r.cheapest[0]); return hotel.Price }
+
+// BestRatedWith is BestRated over the dataset and the added hotels.
+func (r *Reference) BestRatedWith(added *Additions) []string {
+	return extremeWith(r.BestRated(), r.MaxRating(), added, func(h *dataset.Hotel) float64 { return h.Rating }, 1)
+}
+
+// CheapestWith is Cheapest over the dataset and the added hotels.
+func (r *Reference) CheapestWith(added *Additions) []string {
+	return extremeWith(r.Cheapest(), r.MinPrice(), added, func(h *dataset.Hotel) float64 { return h.Price }, -1)
+}
+
+func extremeWith(ids []string, best float64, added *Additions, value func(*dataset.Hotel) float64, sign float64) []string {
+	if added == nil {
+		return ids
+	}
+	for _, hotel := range added.hotels {
+		switch v := value(hotel); {
+		case sign*v > sign*best:
+			best, ids = v, []string{hotel.ID}
+		case v == best:
+			ids = append(ids, hotel.ID)
+		}
+	}
+	return ids
+}
+
+// Additions are hotels added to the seeded dataset at run time.
+type Additions struct {
+	hotels []*dataset.Hotel
+	byID   map[string]*dataset.Hotel
+	index  *geoIndex
+}
+
+// NewAdditions indexes added hotels.
+func NewAdditions(hotels ...*dataset.Hotel) *Additions {
+	added := &Additions{byID: make(map[string]*dataset.Hotel, len(hotels)), index: newGeoIndex(nil)}
+	for _, hotel := range hotels {
+		added.add(hotel)
+	}
+	return added
+}
+
+func (a *Additions) add(hotel *dataset.Hotel) {
+	a.hotels = append(a.hotels, hotel)
+	a.byID[hotel.ID] = hotel
+	cell := geoCellOf(hotel.Lat, hotel.Lon)
+	a.index.cells[cell] = append(a.index.cells[cell], geoPoint{id: hotel.ID, lat: hotel.Lat, lon: hotel.Lon})
+}
+
+// Hotels returns the added hotels in order.
+func (a *Additions) Hotels() []*dataset.Hotel {
+	if a == nil {
+		return nil
+	}
+	return append([]*dataset.Hotel(nil), a.hotels...)
+}
+
+// Hotel returns an added hotel.
+func (a *Additions) Hotel(id string) (*dataset.Hotel, bool) {
+	if a == nil {
+		return nil, false
+	}
+	hotel, ok := a.byID[id]
+	return hotel, ok
+}
 
 // EncodedCoordinates returns a hotel's GeoJSON coordinates as the frontend
 // writes them (the profile's float32 values) and a JSON decoder reads them.

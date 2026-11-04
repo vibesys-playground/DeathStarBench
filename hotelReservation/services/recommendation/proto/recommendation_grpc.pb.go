@@ -20,6 +20,7 @@ const _ = grpc.SupportPackageIsVersion7
 
 const (
 	Recommendation_GetRecommendations_FullMethodName = "/recommendation.Recommendation/GetRecommendations"
+	Recommendation_AddHotel_FullMethodName           = "/recommendation.Recommendation/AddHotel"
 )
 
 // RecommendationClient is the client API for Recommendation service.
@@ -28,6 +29,8 @@ const (
 type RecommendationClient interface {
 	// GetRecommendations returns recommended hotels for a given requirement
 	GetRecommendations(ctx context.Context, in *Request, opts ...grpc.CallOption) (*Result, error)
+	// AddHotel stores the recommendation attributes of a new hotel.
+	AddHotel(ctx context.Context, in *Hotel, opts ...grpc.CallOption) (*AddResult, error)
 }
 
 type recommendationClient struct {
@@ -47,12 +50,23 @@ func (c *recommendationClient) GetRecommendations(ctx context.Context, in *Reque
 	return out, nil
 }
 
+func (c *recommendationClient) AddHotel(ctx context.Context, in *Hotel, opts ...grpc.CallOption) (*AddResult, error) {
+	out := new(AddResult)
+	err := c.cc.Invoke(ctx, Recommendation_AddHotel_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RecommendationServer is the server API for Recommendation service.
 // All implementations must embed UnimplementedRecommendationServer
 // for forward compatibility
 type RecommendationServer interface {
 	// GetRecommendations returns recommended hotels for a given requirement
 	GetRecommendations(context.Context, *Request) (*Result, error)
+	// AddHotel stores the recommendation attributes of a new hotel.
+	AddHotel(context.Context, *Hotel) (*AddResult, error)
 	mustEmbedUnimplementedRecommendationServer()
 }
 
@@ -62,6 +76,9 @@ type UnimplementedRecommendationServer struct {
 
 func (UnimplementedRecommendationServer) GetRecommendations(context.Context, *Request) (*Result, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetRecommendations not implemented")
+}
+func (UnimplementedRecommendationServer) AddHotel(context.Context, *Hotel) (*AddResult, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AddHotel not implemented")
 }
 func (UnimplementedRecommendationServer) mustEmbedUnimplementedRecommendationServer() {}
 
@@ -94,6 +111,24 @@ func _Recommendation_GetRecommendations_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Recommendation_AddHotel_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Hotel)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RecommendationServer).AddHotel(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Recommendation_AddHotel_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RecommendationServer).AddHotel(ctx, req.(*Hotel))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Recommendation_ServiceDesc is the grpc.ServiceDesc for Recommendation service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -104,6 +139,10 @@ var Recommendation_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetRecommendations",
 			Handler:    _Recommendation_GetRecommendations_Handler,
+		},
+		{
+			MethodName: "AddHotel",
+			Handler:    _Recommendation_AddHotel_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
