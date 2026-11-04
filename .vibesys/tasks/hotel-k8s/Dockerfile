@@ -3,7 +3,7 @@
 # Holds kubectl, buildctl, Go, Python 3, and two prebuilt binaries made from a
 # clone of the vibesys repository at a pinned commit: servicebench (the load
 # generator; also baked into the in-cluster load-generator image) and
-# hotel-correctness (the Go semantic oracle in oracle/).
+# hotel-correctness (the Go semantic oracle in evaluator/).
 
 ARG VIBESYS_COMMIT=de037943cb6a8e6e73d00e8bc19fa53570558583
 
@@ -18,8 +18,8 @@ ENV CGO_ENABLED=0 GOFLAGS=-trimpath
 RUN cd /src/resources/evaluators/microservice \
  && go mod edit -replace=github.com/uw-syfi/vibesys/sdk/vs-evaluator/vseval=/src/sdk/vs-evaluator/vseval \
  && go build -o /out/servicebench ./cmd/servicebench
-COPY oracle/ /build/oracle/
-RUN cd /build/oracle && go build -o /out/hotel-correctness ./cmd/hotel-correctness
+COPY evaluator/ /build/evaluator/
+RUN cd /build/evaluator && go build -o /out/hotel-correctness ./cmd/hotel-correctness
 
 FROM moby/buildkit:v0.22.0@sha256:832fa7aa1eb3deb56fa62ae933bfa42dad9a83ff4824dbbaf173b49c722b59d0 AS buildkit
 

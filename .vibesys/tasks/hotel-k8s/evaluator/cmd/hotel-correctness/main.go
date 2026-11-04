@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"vibesys/hotel-correctness-evaluator/internal/hotel"
+	"vibesys/hotel-k8s-evaluator/internal/accuracyapps/hotel"
 	"vibesys/microservice-evaluator/composition"
 	"vibesys/microservice-evaluator/drivers/httpdriver"
 	"vibesys/microservice-evaluator/servicebenchcli"

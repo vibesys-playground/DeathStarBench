@@ -10,7 +10,7 @@ is a candidate input: the CLI versions these files as the task.
 | `Dockerfile` | Job image: kubectl 1.34, buildctl, Go, Python 3, and `servicebench` and `hotel-correctness` built from a clone of the vibesys repository at commit `de037943cb6a8e6e73d00e8bc19fa53570558583`. Base images are pinned by digest. |
 | `run.py` | Trusted wrapper: `check`, `benchmark`, and `ctl` (the oracle's crash/start commands). |
 | `k8s/manifest.yaml` | The application: 19 Deployments, 19 Services, 8 ConfigMaps. |
-| `oracle/` | The Go semantic oracle (`hotel-correctness`), copied from `examples/microservices/hotel-correctness/.vibesys/tasks/compose/evaluator` at the vibesys commit above, tests dropped; its `go.mod` replaces the evaluator modules by the Dockerfile's clone at `/src`. |
+| `evaluator/` | The Go semantic oracle (`hotel-correctness`, in `internal/accuracyapps/hotel`), copied from `examples/microservices/hotel-correctness/.vibesys/tasks/compose/evaluator` at the vibesys commit above, tests dropped; its `go.mod` replaces the evaluator modules by the Dockerfile's clone at `/src`. |
 | `workload/closed.toml` | Closed loop, concurrency 32, the canonical mixed workload; also the oracle's workload. Objective `operations_per_second`. |
 | `workload/open.toml` | The same mix, open loop at a fixed offered rate; objective `latency_ms.p99`. |
 

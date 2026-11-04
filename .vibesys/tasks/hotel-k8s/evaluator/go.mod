@@ -1,4 +1,4 @@
-module vibesys/hotel-correctness-evaluator
+module vibesys/hotel-k8s-evaluator
 
 go 1.21
 
