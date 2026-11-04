@@ -11,7 +11,9 @@ import (
 	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/dialer"
 	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/registry"
 	attractions "github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/services/attractions/proto"
+	geo "github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/services/geo/proto"
 	profile "github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/services/profile/proto"
+	rate "github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/services/rate/proto"
 	recommendation "github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/services/recommendation/proto"
 	reservation "github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/services/reservation/proto"
 	review "github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/services/review/proto"
@@ -39,6 +41,8 @@ type Server struct {
 	reviewClient         review.ReviewClient
 	attractionsClient    attractions.AttractionsClient
 	reservationClient    reservation.ReservationClient
+	rateClient           rate.RateClient
+	geoClient            geo.GeoClient
 
 	KnativeDns string
 	IpAddr     string
@@ -89,6 +93,14 @@ func (s *Server) Run() error {
 		return err
 	}
 
+	if err := s.initRateClient("srv-rate"); err != nil {
+		return err
+	}
+
+	if err := s.initGeoClient("srv-geo"); err != nil {
+		return err
+	}
+
 	log.Info().Msg("Successful")
 
 	log.Trace().Msg("frontend before mux")
@@ -102,6 +114,11 @@ func (s *Server) Run() error {
 	mux.Handle("/museums", http.HandlerFunc(s.museumHandler))
 	mux.Handle("/cinema", http.HandlerFunc(s.cinemaHandler))
 	mux.Handle("/reservation", http.HandlerFunc(s.reservationHandler))
+	mux.Handle("/rates", http.HandlerFunc(s.ratesHandler))
+	mux.Handle("/admin/rate", http.HandlerFunc(s.adminRateHandler))
+	mux.Handle("/admin/profile", http.HandlerFunc(s.adminProfileHandler))
+	mux.Handle("/admin/capacity", http.HandlerFunc(s.adminCapacityHandler))
+	mux.Handle("/admin/hotel", http.HandlerFunc(s.adminHotelHandler))
 
 	log.Trace().Msg("frontend starts serving")
 
@@ -188,6 +205,24 @@ func (s *Server) initReservation(name string) error {
 		return fmt.Errorf("dialer error: %v", err)
 	}
 	s.reservationClient = reservation.NewReservationClient(conn)
+	return nil
+}
+
+func (s *Server) initRateClient(name string) error {
+	conn, err := s.getGprcConn(name)
+	if err != nil {
+		return fmt.Errorf("dialer error: %v", err)
+	}
+	s.rateClient = rate.NewRateClient(conn)
+	return nil
+}
+
+func (s *Server) initGeoClient(name string) error {
+	conn, err := s.getGprcConn(name)
+	if err != nil {
+		return fmt.Errorf("dialer error: %v", err)
+	}
+	s.geoClient = geo.NewGeoClient(conn)
 	return nil
 }
 
