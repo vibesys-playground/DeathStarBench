@@ -20,6 +20,7 @@
 #include "../ClientPool.h"
 #include "../ThriftClient.h"
 #include "../logger.h"
+#include "../machine_id.h"
 #include "../tracing.h"
 
 // Custom Epoch (January 1, 2018 Midnight GMT = 2018-01-01T00:00:00Z)
@@ -912,6 +913,11 @@ u_int16_t HashMacAddressPid(const std::string &mac) {
 }
 
 std::string GetMachineId(std::string &netif) {
+  std::string ip_machine_id = MachineIdFromIPv4(netif);
+  if (!ip_machine_id.empty()) {
+    return ip_machine_id;
+  }
+  // No IPv4 address: a hash of the MAC address, which replicas may share.
   std::string mac_hash;
 
   std::string mac_addr_filename = "/sys/class/net/" + netif + "/address";
