@@ -17,12 +17,10 @@ RUN git init -q /src \
  && test "$(git -C /src rev-parse HEAD)" = "${VIBESYS_COMMIT}"
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath
 COPY evaluator/ /build/evaluator/
-# BRING-UP: builds the commands the module has so far (checker comes later).
-RUN cd /build/evaluator && mkdir -p /out \
- && for name in loadgen seed checker; do \
-      if [ -d "cmd/$name" ]; then go build -o "/out/$name" "./cmd/$name"; fi; \
-    done \
- && test -x /out/loadgen
+RUN cd /build/evaluator \
+ && go build -o /out/loadgen ./cmd/loadgen \
+ && go build -o /out/seed ./cmd/seed \
+ && go build -o /out/checker ./cmd/checker
 
 FROM moby/buildkit:v0.22.0@sha256:832fa7aa1eb3deb56fa62ae933bfa42dad9a83ff4824dbbaf173b49c722b59d0 AS buildkit
 

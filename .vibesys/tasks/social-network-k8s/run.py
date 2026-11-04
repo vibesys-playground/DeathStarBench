@@ -208,7 +208,7 @@ def build_evaluator_image(scratch: Path) -> str:
     registry = require_env("VIBESYS_K8S_REGISTRY")
     context = scratch / "evaluator"
     (context / "workload").mkdir(parents=True)
-    binaries = ["loadgen"] + (["seed"] if shutil.which("seed") else [])
+    binaries = ["loadgen", "seed"]
     for name in binaries:
         shutil.copy(tool(name), context / name)
     for name in ("closed.toml", "open.toml"):
@@ -686,9 +686,6 @@ def wait_job(deployment: Deployment, name: str, timeout: float) -> tuple[bool, s
 
 def seed_dataset(deployment: Deployment, image: str, artifacts: Path | None) -> dict | None:
     """Write the task's dataset directly into the data tier (Job "seed")."""
-    if not shutil.which("seed"):
-        log("BRING-UP: no seed binary in the job image; the deployment starts empty")
-        return None
     log("seeding the task's dataset: starting Job seed")
     started = time.monotonic()
     deployment.kube.kubectl("apply", "-f", "-", input_text=SEED_JOB.format(
@@ -713,7 +710,27 @@ def seed_dataset(deployment: Deployment, image: str, artifacts: Path | None) -> 
     if artifacts:
         (artifacts / "seed.summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     log(f"seeded the dataset in {seconds:.0f}s: {json.dumps(summary)[:400]}")
+    create_indexes(deployment)
     return summary
+
+
+# Indexes on the keys the services look documents up by, as a production database
+# would have (social-graph user_id, post post_id and url-shorten shortened_url are
+# created by the seed and by the services themselves).
+INDEXES = [
+    ("user-mongodb", "user", "user", "{username: 1}", "{unique: true}"),
+    ("user-mongodb", "user", "user", "{user_id: 1}", "{unique: true}"),
+    ("user-timeline-mongodb", "user-timeline", "user-timeline", "{user_id: 1}", "{unique: true}"),
+]
+
+
+def create_indexes(deployment: Deployment) -> None:
+    for target, database, collection, keys, options in INDEXES:
+        script = (f"db.getSiblingDB('{database}').getCollection('{collection}')"
+                  f".createIndex({keys}, {options})")
+        deployment.kube.kubectl("exec", f"deployment/{target}", "--", "mongo", "--quiet",
+                                "--eval", script, timeout=120)
+    log(f"created {len(INDEXES)} indexes")
 
 
 def draw_seeds() -> dict:
@@ -836,26 +853,20 @@ def prepare(project_root: Path, scratch: Path, artifacts: Path | None) -> tuple[
 def do_check(project_root: Path, scratch: Path) -> int:
     artifacts = artifacts_dir()
     deployment, _ = prepare(project_root, scratch, artifacts)
-    if not shutil.which("checker"):
-        log("BRING-UP: no checker binary in the job image; exercising the restart hook instead")
-        hook = json.loads(restart_command_json(deployment.name, deployment.port))
-        for action in (["restart", "nginx-thrift"], ["restart", "home-timeline-service"],
-                       ["flush", "user-memcached"], ["flush", "user-timeline-redis"]):
-            started = time.monotonic()
-            run(hook + action, timeout=600, capture=False)
-            log(f"BRING-UP: hook {' '.join(action)} took {time.monotonic() - started:.1f}s")
-        deployment.save_pods(artifacts, "pods.txt")
-        return 0
     log("running the checker")
+    started = time.monotonic()
     completed = subprocess.run(
         [
             tool("checker"),
             "--base-url", deployment.base_url,
             "--seed", "random",
             "--restart-command-json", restart_command_json(deployment.name, deployment.port),
+            "--deployments", ",".join(STATELESS),
+            "--caches", ",".join(MEMCACHED + CACHE_REDIS),
         ],
         check=False,
     )
+    log(f"checker exited {completed.returncode} after {time.monotonic() - started:.0f}s")
     deployment.save_pods(artifacts, "pods.txt")
     return completed.returncode
 
