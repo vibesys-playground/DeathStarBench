@@ -291,7 +291,9 @@ func (m *Mongo) UniqueIndex(ctx context.Context, database, collection, key strin
 	return err
 }
 
-func (m *Mongo) markers() *mongo.Collection { return m.client.Database("vibesys-seed").Collection("meta") }
+func (m *Mongo) markers() *mongo.Collection {
+	return m.client.Database("vibesys-seed").Collection("meta")
+}
 
 func (m *Mongo) Marker(ctx context.Context) (string, error) {
 	var marker struct {
