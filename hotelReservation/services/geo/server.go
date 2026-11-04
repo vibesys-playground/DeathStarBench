@@ -54,17 +54,9 @@ func (s *Server) Run() error {
 	}
 
 	if s.index == nil {
-		database := s.MongoClient.Database("geo-db")
-		// Read the change counter before loading, so no addition is missed.
-		version, err := changes.Version(context.TODO(), database)
-		if err != nil {
-			return fmt.Errorf("read geo-db change counter: %v", err)
+		if err := s.Load(); err != nil {
+			return err
 		}
-		if err := changes.EnsureIndex(context.TODO(), database.Collection("geo")); err != nil {
-			return fmt.Errorf("index added hotels: %v", err)
-		}
-		s.index = newGeoIndex(s.MongoClient)
-		go changes.Watch(database, version, s.loadAdded)
 	}
 
 	s.uuid = uuid.New().String()
@@ -102,6 +94,22 @@ func (s *Server) Run() error {
 	log.Info().Msg("Successfully registered in consul")
 
 	return srv.Serve(lis)
+}
+
+// Load reads the catalog from MongoDB and keeps it current: it reads the
+// change counter first, so no addition is missed, then polls it.
+func (s *Server) Load() error {
+	database := s.MongoClient.Database("geo-db")
+	version, err := changes.Version(context.TODO(), database)
+	if err != nil {
+		return fmt.Errorf("read geo-db change counter: %v", err)
+	}
+	if err := changes.EnsureIndex(context.TODO(), database.Collection("geo")); err != nil {
+		return fmt.Errorf("index added hotels: %v", err)
+	}
+	s.index = newGeoIndex(s.MongoClient)
+	go changes.Watch(database, version, s.loadAdded)
+	return nil
 }
 
 // Shutdown cleans up any processes
