@@ -8,7 +8,7 @@ Both are measured on every sample, against a Kubernetes cluster, in two phases:
 | Objective | Direction | Phase |
 | --- | --- | --- |
 | `operations_per_second` | max | Closed loop, 32 concurrent clients, the canonical mixed workload. |
-| `latency_ms.p99` | min | Open loop at a fixed offered rate (declared in `workload/open.toml`), the same mix. |
+| `latency_ms.p99` | min | Open loop, the same mix, offered at 70% of the throughput the same sample's closed loop just measured. |
 
 The two together form a Pareto frontier: a change that raises throughput and lowers tail
 latency is a win; a change that trades one for the other is a tradeoff, not a promotion.
@@ -28,7 +28,9 @@ The task owns everything else, and a candidate cannot change it:
   services, 6 MongoDB, 3 memcached, consul and jaeger, replica counts (1 each), the
   service config files and environment variables of each application pod, and the
   resources below;
-- the load generator, the workloads and the offered rate, and the semantic oracle.
+- the load generator, the workloads, the open loop's offered rate (70% of the sample's own
+  closed-loop throughput, so a faster candidate is held to proportionally more load), and the
+  semantic oracle.
 
 Resources are fixed. Every application pod gets exactly 1 CPU (request = limit) and
 2 GiB. The data and cache tiers have fixed limits so they are not the bottleneck:

@@ -6,7 +6,7 @@ application = "hotel"
 
 [load]
 model = "open_loop"
-rate = 670
+rate = 670   # placeholder: run.py passes --rate = 0.7 x this sample's closed-loop throughput
 duration_seconds = 60
 warmup_seconds = 10
 concurrency = 512

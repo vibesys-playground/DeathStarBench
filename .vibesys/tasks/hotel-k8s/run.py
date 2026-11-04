@@ -446,7 +446,7 @@ spec:
         args:
         - |
           loadgen --mode benchmark --workload /workload/{workload}.toml \\
-            --base-url {url} --startup-timeout 120 \\
+            --base-url {url} --startup-timeout 120{extra} \\
             --output-json /tmp/summary.json --vs-output /tmp/stream.jsonl
           rc=$?
           echo "::summary::"; cat /tmp/summary.json 2>/dev/null
@@ -525,13 +525,18 @@ def seed_database(deployment: Deployment, image: str, artifacts: Path | None) ->
     return summary
 
 
-def run_phase(deployment: Deployment, image: str, workload: str, artifacts: Path | None) -> dict:
-    """Run one load-generator Job in the namespace; return its protocol-2 result values."""
+def run_phase(deployment: Deployment, image: str, workload: str, artifacts: Path | None,
+              rate: float | None = None) -> dict:
+    """Run one load-generator Job in the namespace; return its protocol-2 result values.
+
+    rate, when given, overrides the workload's offered rate (operations/s).
+    """
     name = f"loadgen-{workload}"
-    log(f"phase {workload}: starting Job {name}")
+    extra = f" --rate {rate:.2f}" if rate is not None else ""
+    log(f"phase {workload}: starting Job {name}" + (f" at {rate:.2f} ops/s" if rate is not None else ""))
     manifest = LOADGEN_JOB.format(
         name=name, image=image, cpu=LOADGEN_CPU, memory=LOADGEN_MEMORY, workload=workload,
-        url=FRONTEND_URL,
+        url=FRONTEND_URL, extra=extra,
     )
     deployment.kube.kubectl("apply", "-f", "-", input_text=manifest)
     _, logs = wait_job(deployment, name, 1500)
@@ -566,6 +571,9 @@ def write_stream(path: Path, records: list[dict]) -> None:
     path.write_text("".join(json.dumps(record) + "\n" for record in records))
 
 
+# The open-loop phase offers this fraction of the sample's closed-loop throughput.
+OPEN_LOOP_LOAD_FRACTION = 0.7
+
 HELLO = {
     "kind": "hello",
     "protocol": 2,
@@ -589,10 +597,20 @@ def do_benchmark(project_root: Path, scratch: Path, output: Path) -> int:
         deployment.start_forward()
         deployment.wait_ready()
         closed = run_phase(deployment, loadgen_image, "closed", artifacts)
-        open_loop = run_phase(deployment, loadgen_image, "open", artifacts)
         throughput = closed["operations_per_second"]
+        # p99 is measured at a fixed fraction of this sample's own closed-loop
+        # throughput, so a faster candidate is held to proportionally more load.
+        offered = OPEN_LOOP_LOAD_FRACTION * throughput
+        open_loop = run_phase(deployment, loadgen_image, "open", artifacts, rate=offered)
         p99 = open_loop["latency_ms.p99"]
-        log(f"closed loop: {throughput:.1f} ops/s; open loop p99: {p99:.2f} ms")
+        log(f"closed loop: {throughput:.1f} ops/s; open loop at {offered:.1f} ops/s "
+            f"({OPEN_LOOP_LOAD_FRACTION:.0%}): p99 {p99:.2f} ms")
+        if artifacts:
+            (artifacts / "offered-rate.json").write_text(json.dumps({
+                "closed_loop_operations_per_second": throughput,
+                "open_loop_load_fraction": OPEN_LOOP_LOAD_FRACTION,
+                "open_loop_offered_operations_per_second": offered,
+            }) + "\n")
         write_stream(output, [HELLO, {
             "kind": "result", "label": "",
             "values": {"operations_per_second": throughput, "latency_ms.p99": p99},
