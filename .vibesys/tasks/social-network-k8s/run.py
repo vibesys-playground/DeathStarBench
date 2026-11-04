@@ -453,6 +453,23 @@ class Deployment:
             log(f"pods restarted: {', '.join(restarts)}")
         if artifacts:
             (artifacts / name).write_text(result.stdout)
+            self.save_logs(artifacts / "logs")
+
+    def save_logs(self, directory: Path, tail: int = 300) -> None:
+        """The last lines of every application and data-tier container (and of its previous run)."""
+        directory.mkdir(parents=True, exist_ok=True)
+        result = self.kube.kubectl("get", "pods", "-l", "tier", "-o", "json", check=False)
+        if result.returncode != 0:
+            return
+        for item in json.loads(result.stdout).get("items", []):
+            pod = item["metadata"]["name"]
+            text = self.kube.kubectl("logs", pod, f"--tail={tail}", check=False, timeout=60).stdout
+            statuses = item.get("status", {}).get("containerStatuses", [])
+            if any(status.get("restartCount", 0) > 0 for status in statuses):
+                previous = self.kube.kubectl("logs", pod, "--previous", f"--tail={tail}",
+                                             check=False, timeout=60).stdout
+                text += "\n--- previous container ---\n" + previous
+            (directory / f"{pod}.log").write_text(text)
 
 
 def wait_frontend_ready(port: int, timeout: float, rounds: int = 2) -> None:
@@ -846,6 +863,7 @@ def do_check(project_root: Path, scratch: Path) -> int:
 def do_benchmark(project_root: Path, scratch: Path, output: Path) -> int:
     write_stream(output, [HELLO])
     artifacts = artifacts_dir()
+    deployment = None
     try:
         deployment, evaluator_image = prepare(project_root, scratch, artifacts)
         seeds = {"closed": draw_seeds(), "open": draw_seeds()}
@@ -877,6 +895,8 @@ def do_benchmark(project_root: Path, scratch: Path, output: Path) -> int:
     except (JobError, subprocess.TimeoutExpired, KeyError, json.JSONDecodeError) as error:
         message = str(error) or type(error).__name__
         log(f"benchmark failed: {message}")
+        if deployment is not None and deployment.created:
+            deployment.save_pods(artifacts, "pods.txt")
         write_stream(output, [HELLO, {"kind": "error", "message": message[:2000]}])
         return 1
 
