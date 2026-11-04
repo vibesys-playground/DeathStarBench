@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 
+	hotelsupport "vibesys/hotel-k8s-evaluator/internal/appsupport/hotel"
 	"vibesys/microservice-evaluator/accuracy"
 )
 
@@ -17,7 +18,7 @@ func (a *Application) verifyConcurrentIsolation(
 	seed int64,
 	random *rand.Rand,
 ) (int, error) {
-	username, password := MustUser(0)
+	username, password := hotelsupport.MustUser(0)
 	rateIDs := sortedRateBackedIDs()
 	random.Shuffle(len(rateIDs), func(left, right int) {
 		rateIDs[left], rateIDs[right] = rateIDs[right], rateIDs[left]
@@ -69,7 +70,7 @@ func (a *Application) verifyLinearizableCapacity(
 	cases int,
 	random *rand.Rand,
 ) (int, error) {
-	username, password := MustUser(0)
+	username, password := hotelsupport.MustUser(0)
 	rateIDs := sortedRateBackedIDs()
 	checks := 0
 	for caseIndex := 0; caseIndex < cases; caseIndex++ {
@@ -194,7 +195,7 @@ func (a *Application) probeRemaining(
 	reserved int,
 	label string,
 ) (int, error) {
-	username, password := MustUser(0)
+	username, password := hotelsupport.MustUser(0)
 	capacity, err := capacityForHotel(hotelID)
 	if err != nil {
 		return 0, err

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	hotelsupport "vibesys/hotel-k8s-evaluator/internal/appsupport/hotel"
 	"vibesys/microservice-evaluator/accuracy/httpcheck"
 )
 
@@ -22,7 +23,7 @@ func (a *Application) verifyDegenerateDateRanges(
 	seed int64,
 	random *rand.Rand,
 ) (int, error) {
-	username, password := MustUser(0)
+	username, password := hotelsupport.MustUser(0)
 	rateIDs := sortedRateBackedIDs()
 	hotelID := rateIDs[random.Intn(len(rateIDs))]
 	capacity, err := capacityForHotel(hotelID)
@@ -68,7 +69,7 @@ func (a *Application) verifyMultiNightAtomicity(
 	cases int,
 	random *rand.Rand,
 ) (int, error) {
-	username, password := MustUser(0)
+	username, password := hotelsupport.MustUser(0)
 	rateIDs := sortedRateBackedIDs()
 	checks := 0
 	for caseIndex := 0; caseIndex < cases; caseIndex++ {
@@ -131,7 +132,7 @@ func (a *Application) verifyEndpointLiveness(
 	seed int64,
 	random *rand.Rand,
 ) (int, error) {
-	username, password := MustUser(0)
+	username, password := hotelsupport.MustUser(0)
 	night := namespacedNight(seed, livenessOffset)
 	unknown := strconv.Itoa(1_000_000 + random.Intn(1_000_000))
 	query := reservationActionQuery(unknown, night, 1, "liveness-unknown-hotel", username, password)

@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
+	hotelsupport "vibesys/hotel-k8s-evaluator/internal/appsupport/hotel"
 	"vibesys/microservice-evaluator/api"
-	hotelsupport "vibesys/microservice-evaluator/appsupport/hotel"
 )
 
 func TestNewValidatesHotelContract(t *testing.T) {

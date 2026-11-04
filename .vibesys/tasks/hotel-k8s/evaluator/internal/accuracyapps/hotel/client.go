@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	hotelsupport "vibesys/hotel-k8s-evaluator/internal/appsupport/hotel"
 	"vibesys/microservice-evaluator/accuracy/httpcheck"
 	"vibesys/microservice-evaluator/api"
 	"vibesys/microservice-evaluator/wire/httpjson"
@@ -22,7 +23,7 @@ func (c client) request(ctx context.Context, path string, query map[string]strin
 	requestContext, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	return c.runtime.Invoke(requestContext, api.Invocation{
-		Target: GatewayTarget, Operation: "accuracy", Payload: spec,
+		Target: hotelsupport.GatewayTarget, Operation: "accuracy", Payload: spec,
 	})
 }
 

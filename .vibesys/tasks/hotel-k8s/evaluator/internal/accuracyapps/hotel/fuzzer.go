@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	hotelsupport "vibesys/hotel-k8s-evaluator/internal/appsupport/hotel"
 	"vibesys/microservice-evaluator/accuracy"
 )
 
@@ -103,7 +104,7 @@ func generateSequentialProgram(
 	history := make([]differentialAction, 0, 5+cases*9)
 
 	userIndex := random.Intn(501)
-	username, password, err := User(userIndex)
+	username, password, err := hotelsupport.User(userIndex)
 	if err != nil {
 		return accuracy.Program[differentialAction]{}, err
 	}
@@ -142,7 +143,7 @@ func generateSequentialProgram(
 		}
 		firstRooms := 1 + random.Intn(capacity-1)
 		secondRooms := capacity - firstRooms
-		validUser, validPassword, err := User(random.Intn(501))
+		validUser, validPassword, err := hotelsupport.User(random.Intn(501))
 		if err != nil {
 			return accuracy.Program[differentialAction]{}, err
 		}

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	hotelsupport "vibesys/hotel-k8s-evaluator/internal/appsupport/hotel"
 	"vibesys/microservice-evaluator/accuracy"
 	"vibesys/microservice-evaluator/api"
 )
@@ -346,7 +347,7 @@ func (a *Application) verifyAuthentication(ctx context.Context, c client, random
 		if err := checkContext(ctx); err != nil {
 			return checks, err
 		}
-		username, password, err := User(index)
+		username, password, err := hotelsupport.User(index)
 		if err != nil {
 			return checks, err
 		}
@@ -366,7 +367,7 @@ func (a *Application) verifyAuthentication(ctx context.Context, c client, random
 }
 
 func (a *Application) verifyNegativeCases(ctx context.Context, c client, random *rand.Rand) (int, error) {
-	username, password := MustUser(0)
+	username, password := hotelsupport.MustUser(0)
 	checks := 0
 	reservationBase := map[string]string{
 		"inDate": "3000-01-01", "outDate": "3000-01-02", "hotelId": "1",
@@ -405,9 +406,9 @@ func (a *Application) verifyOptionalReservationNumber(
 	seed int64,
 	random *rand.Rand,
 ) (int, error) {
-	username, password := MustUser(0)
+	username, password := hotelsupport.MustUser(0)
 	hotelID := 1 + random.Intn(80)
-	capacity, err := Capacity(hotelID)
+	capacity, err := hotelsupport.Capacity(hotelID)
 	if err != nil {
 		return 0, err
 	}
@@ -439,11 +440,11 @@ func (a *Application) verifySearchAvailability(
 	seed int64,
 	random *rand.Rand,
 ) (int, error) {
-	username, password := MustUser(0)
+	username, password := hotelsupport.MustUser(0)
 	rateIDs := sortedRateBackedIDs()
 	hotelID := rateIDs[random.Intn(len(rateIDs))]
 	numericID, _ := strconv.Atoi(hotelID)
-	capacity, err := Capacity(numericID)
+	capacity, err := hotelsupport.Capacity(numericID)
 	if err != nil {
 		return 0, err
 	}
@@ -526,7 +527,7 @@ func (a *Application) verifyReservations(
 	cases int,
 	random *rand.Rand,
 ) (int, error) {
-	username, password := MustUser(0)
+	username, password := hotelsupport.MustUser(0)
 	start := reservationDate(seed)
 	checks := 0
 	reserve := func(hotelID string, date [2]string, rooms int, customer, expected string) error {
@@ -561,7 +562,7 @@ func (a *Application) verifyReservations(
 		}
 		primary := strconv.Itoa(primaryID)
 		isolation := strconv.Itoa(isolationID)
-		capacity, err := Capacity(primaryID)
+		capacity, err := hotelsupport.Capacity(primaryID)
 		if err != nil {
 			return checks, err
 		}
@@ -593,11 +594,11 @@ func (a *Application) verifyCrashRecovery(
 	crash func(context.Context) error,
 	startCandidate func(context.Context) error,
 ) (int, error) {
-	username, password := MustUser(0)
+	username, password := hotelsupport.MustUser(0)
 	rateIDs := sortedRateBackedIDs()
 	hotelID := rateIDs[random.Intn(len(rateIDs))]
 	numericID, _ := strconv.Atoi(hotelID)
-	capacity, err := Capacity(numericID)
+	capacity, err := hotelsupport.Capacity(numericID)
 	if err != nil {
 		return 0, err
 	}

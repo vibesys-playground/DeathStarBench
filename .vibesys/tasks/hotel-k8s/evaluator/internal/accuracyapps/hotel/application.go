@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	hotelsupport "vibesys/hotel-k8s-evaluator/internal/appsupport/hotel"
 	"vibesys/microservice-evaluator/api"
 )
 
@@ -13,11 +14,11 @@ type Application struct {
 	timeout time.Duration
 	seed    int64
 	catalog map[string]profile
-	strict  Strictness
+	strict  hotelsupport.Strictness
 }
 
 func New(workload api.Workload) (api.AccuracyApplication, error) {
-	config, err := ValidateTopology(workload)
+	config, err := hotelsupport.ValidateTopology(workload)
 	if err != nil {
 		return nil, err
 	}
@@ -65,11 +66,11 @@ func (a *Application) Properties() []api.AccuracyProperty {
 }
 
 func (a *Application) ReadinessProbes() []api.ReadinessProbe {
-	return ReadinessProbes(a.seed)
+	return hotelsupport.ReadinessProbes(a.seed)
 }
 
 func (a *Application) PreflightProbes() []api.ReadinessProbe {
-	return PreflightProbes()
+	return hotelsupport.PreflightProbes()
 }
 
 func (*Application) PreflightProperties() []string {

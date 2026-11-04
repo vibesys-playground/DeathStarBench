@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 
+	hotelsupport "vibesys/hotel-k8s-evaluator/internal/appsupport/hotel"
 	"vibesys/microservice-evaluator/accuracy"
 )
 
@@ -30,7 +31,7 @@ func (a *Application) verifyDurableState(
 	start func(context.Context) error,
 	checkAvailability bool,
 ) (int, error) {
-	username, password := MustUser(0)
+	username, password := hotelsupport.MustUser(0)
 	rateIDs := sortedRateBackedIDs()
 	random.Shuffle(len(rateIDs), func(left, right int) {
 		rateIDs[left], rateIDs[right] = rateIDs[right], rateIDs[left]

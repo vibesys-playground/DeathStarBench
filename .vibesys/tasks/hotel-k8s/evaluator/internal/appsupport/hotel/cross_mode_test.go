@@ -4,10 +4,10 @@ import (
 	"reflect"
 	"testing"
 
-	accuracyhotel "vibesys/microservice-evaluator/accuracyapps/hotel"
+	accuracyhotel "vibesys/hotel-k8s-evaluator/internal/accuracyapps/hotel"
+	benchmarkhotel "vibesys/hotel-k8s-evaluator/internal/apps/hotel"
+	"vibesys/hotel-k8s-evaluator/internal/appsupport/hotel"
 	"vibesys/microservice-evaluator/api"
-	benchmarkhotel "vibesys/microservice-evaluator/apps/hotel"
-	"vibesys/microservice-evaluator/appsupport/hotel"
 )
 
 func workload() api.Workload {

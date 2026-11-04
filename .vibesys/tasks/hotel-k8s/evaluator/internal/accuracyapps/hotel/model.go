@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strconv"
 	"time"
+
+	hotelsupport "vibesys/hotel-k8s-evaluator/internal/appsupport/hotel"
 )
 
 // hotelState is the complete logical state used by the Hotel reference
@@ -26,7 +28,7 @@ type hotelOracle struct {
 func newHotelOracle(catalog map[string]profile) (*hotelOracle, error) {
 	users := make(map[string]string, 501)
 	for index := 0; index <= 500; index++ {
-		username, password, err := User(index)
+		username, password, err := hotelsupport.User(index)
 		if err != nil {
 			return nil, err
 		}
@@ -237,5 +239,5 @@ func capacityForHotel(hotelID string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("parse hotel ID %q: %w", hotelID, err)
 	}
-	return Capacity(numericID)
+	return hotelsupport.Capacity(numericID)
 }
