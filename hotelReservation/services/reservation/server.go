@@ -20,7 +20,9 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 )
 
 const name = "srv-reservation"
@@ -393,4 +395,83 @@ type reservation struct {
 type number struct {
 	HotelId string `bson:"hotelId"`
 	Number  int    `bson:"numberOfRoom"`
+}
+
+// SetCapacity sets a hotel's number of rooms in MongoDB, then invalidates
+// the cached capacity, so the next reservation uses it. A capacity below the
+// rooms already reserved on any night is rejected: a capacity change never
+// oversells. (Like reservations themselves, a change is not ordered with
+// reservations of the same hotel that run concurrently with it.)
+func (s *Server) SetCapacity(ctx context.Context, req *pb.CapacityRequest) (*pb.CapacityResult, error) {
+	if req.HotelId == "" || req.Rooms < 0 {
+		return nil, status.Error(codes.InvalidArgument, "hotelId and a non-negative number of rooms are required")
+	}
+	database := s.MongoClient.Database("reservation-db")
+	maxReserved, err := maxReservedRooms(ctx, database.Collection("reservation"), req.HotelId)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "count reservations: %v", err)
+	}
+	result := &pb.CapacityResult{MaxReserved: int32(maxReserved)}
+	if maxReserved > int(req.Rooms) {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"hotel %s has %d rooms reserved on a night, more than %d", req.HotelId, maxReserved, req.Rooms)
+	}
+	update, err := database.Collection("number").UpdateOne(ctx,
+		bson.D{{Key: "hotelId", Value: req.HotelId}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "numberOfRoom", Value: req.Rooms}}}},
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "update capacity: %v", err)
+	}
+	if update.MatchedCount == 0 {
+		return nil, status.Errorf(codes.NotFound, "no hotel %s", req.HotelId)
+	}
+	if err := lease.Invalidate(s.MemcClient, req.HotelId+"_cap"); err != nil {
+		return nil, status.Errorf(codes.Unavailable, "invalidate cached capacity: %v", err)
+	}
+	return result, nil
+}
+
+// AddCapacity stores the number of rooms of a new hotel. The collection's
+// unique index on "hotelId" rejects a hotel that has one.
+func (s *Server) AddCapacity(ctx context.Context, req *pb.CapacityRequest) (*pb.CapacityResult, error) {
+	if req.HotelId == "" || req.Rooms < 0 {
+		return nil, status.Error(codes.InvalidArgument, "hotelId and a non-negative number of rooms are required")
+	}
+	_, err := s.MongoClient.Database("reservation-db").Collection("number").InsertOne(ctx,
+		bson.D{{Key: "hotelId", Value: req.HotelId}, {Key: "numberOfRoom", Value: req.Rooms}})
+	if mongo.IsDuplicateKeyError(err) {
+		return nil, status.Errorf(codes.AlreadyExists, "hotel %s has a capacity", req.HotelId)
+	}
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "insert capacity: %v", err)
+	}
+	if err := lease.Invalidate(s.MemcClient, req.HotelId+"_cap"); err != nil {
+		return nil, status.Errorf(codes.Unavailable, "invalidate cached capacity: %v", err)
+	}
+	return &pb.CapacityResult{}, nil
+}
+
+// maxReservedRooms is the largest number of rooms reserved on one night of
+// the hotel (reservations are stored one document per night).
+func maxReservedRooms(ctx context.Context, collection *mongo.Collection, hotelId string) (int, error) {
+	cursor, err := collection.Aggregate(ctx, mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{{Key: "hotelId", Value: hotelId}}}},
+		{{Key: "$group", Value: bson.D{{Key: "_id", Value: "$inDate"}, {Key: "rooms", Value: bson.D{{Key: "$sum", Value: "$number"}}}}}},
+		{{Key: "$sort", Value: bson.D{{Key: "rooms", Value: -1}}}},
+		{{Key: "$limit", Value: 1}},
+	})
+	if err != nil {
+		return 0, err
+	}
+	var nights []struct {
+		Rooms int `bson:"rooms"`
+	}
+	if err := cursor.All(ctx, &nights); err != nil {
+		return 0, err
+	}
+	if len(nights) == 0 {
+		return 0, nil
+	}
+	return nights[0].Rooms, nil
 }

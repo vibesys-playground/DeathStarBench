@@ -22,7 +22,9 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 )
 
 const name = "srv-rate"
@@ -192,4 +194,82 @@ func (r RatePlans) Swap(i, j int) {
 
 func (r RatePlans) Less(i, j int) bool {
 	return r[i].RoomType.TotalRate > r[j].RoomType.TotalRate
+}
+
+// UpdateRate sets the prices of the hotel's plan with the given code in
+// MongoDB, then invalidates the hotel's cached plans.
+func (s *Server) UpdateRate(ctx context.Context, req *pb.UpdateRateRequest) (*pb.UpdateRateResult, error) {
+	if req.HotelId == "" || req.Code == "" {
+		return nil, status.Error(codes.InvalidArgument, "hotelId and code are required")
+	}
+	collection := s.MongoClient.Database("rate-db").Collection("inventory")
+	result, err := collection.UpdateOne(ctx,
+		bson.D{{Key: "hotelId", Value: req.HotelId}, {Key: "code", Value: req.Code}},
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "roomType.bookableRate", Value: req.BookableRate},
+			{Key: "roomType.totalRate", Value: req.TotalRate},
+			{Key: "roomType.totalRateInclusive", Value: req.TotalRateInclusive},
+		}}},
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "update rate plan: %v", err)
+	}
+	if result.MatchedCount == 0 {
+		return nil, status.Errorf(codes.NotFound, "hotel %s has no rate plan %s", req.HotelId, req.Code)
+	}
+	if err := lease.Invalidate(s.MemcClient, req.HotelId); err != nil {
+		return nil, status.Errorf(codes.Unavailable, "invalidate cached rates: %v", err)
+	}
+	return &pb.UpdateRateResult{}, nil
+}
+
+// AddRates stores rate plans in MongoDB, then invalidates the cached plans
+// of their hotels.
+func (s *Server) AddRates(ctx context.Context, req *pb.AddRatesRequest) (*pb.AddRatesResult, error) {
+	documents := make([]interface{}, 0, len(req.RatePlans))
+	hotels := make(map[string]struct{})
+	for _, plan := range req.RatePlans {
+		if plan.HotelId == "" || plan.Code == "" || plan.RoomType == nil {
+			return nil, status.Error(codes.InvalidArgument, "a rate plan needs hotelId, code and roomType")
+		}
+		hotels[plan.HotelId] = struct{}{}
+		documents = append(documents, storedRatePlan{
+			HotelId: plan.HotelId, Code: plan.Code, InDate: plan.InDate, OutDate: plan.OutDate,
+			RoomType: &storedRoomType{
+				BookableRate: plan.RoomType.BookableRate, Code: plan.RoomType.Code,
+				RoomDescription: plan.RoomType.RoomDescription, TotalRate: plan.RoomType.TotalRate,
+				TotalRateInclusive: plan.RoomType.TotalRateInclusive,
+			},
+		})
+	}
+	if len(documents) == 0 {
+		return &pb.AddRatesResult{}, nil
+	}
+	collection := s.MongoClient.Database("rate-db").Collection("inventory")
+	if _, err := collection.InsertMany(ctx, documents); err != nil {
+		return nil, status.Errorf(codes.Internal, "insert rate plans: %v", err)
+	}
+	for hotelId := range hotels {
+		if err := lease.Invalidate(s.MemcClient, hotelId); err != nil {
+			return nil, status.Errorf(codes.Unavailable, "invalidate cached rates: %v", err)
+		}
+	}
+	return &pb.AddRatesResult{}, nil
+}
+
+// storedRatePlan is a rate-db.inventory document (cmd/rate/db.go RatePlan).
+type storedRatePlan struct {
+	HotelId  string          `bson:"hotelId"`
+	Code     string          `bson:"code"`
+	InDate   string          `bson:"inDate"`
+	OutDate  string          `bson:"outDate"`
+	RoomType *storedRoomType `bson:"roomType"`
+}
+
+type storedRoomType struct {
+	BookableRate       float64 `bson:"bookableRate"`
+	Code               string  `bson:"code"`
+	RoomDescription    string  `bson:"roomDescription"`
+	TotalRate          float64 `bson:"totalRate"`
+	TotalRateInclusive float64 `bson:"totalRateInclusive"`
 }
