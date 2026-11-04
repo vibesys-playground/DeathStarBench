@@ -34,8 +34,8 @@ reservation may mutate capacity before returning the authentication failure.
 GeoJSON object and feature order are normalized, while schemas, profile values,
 messages, and result membership remain exact.
 
-This package does not model internal gRPC calls, databases, caches, timing, or
-service topology.
+This package does not model internal gRPC calls, databases, caches, or service
+topology; the write checks model only the 1 s visibility bound.
 
 ## Event programs
 
@@ -66,6 +66,29 @@ Durability programs place crash and start between acknowledged writes and
 readback calls. The managed lifecycle hooks perform the real process events;
 `hotelOracle.AfterCrash` defines which logical state must survive. Search and
 reservation readbacks are ordinary actions judged by `Step`.
+
+## Writes
+
+`writes.go` checks the owner routes against the contract in the task's
+OBJECTIVE.md, with `hotelsupport.State` (the dataset plus the writes) as the
+model. These checks run after all others, since they change seeded answers,
+and use the dates from `writesOffset` and hotels in a sandbox cell of their own
+for additions.
+
+| Property | What it asserts |
+| --- | --- |
+| `write_validation` | GET on an owner route is 405; missing or negative parameters and malformed bodies are 400; unknown hotels and plans are 404; none of them changes anything. |
+| `write_rate_visibility` | New prices of a plan (one plan written twice) are served by `/rates` at 1 s + 50 ms, in 8 reads; a read right after the write shows a value acknowledged within the last second or the one before. |
+| `write_profile_visibility` | A new phone (and once a new name) shows in search and distance recommendations, under the same rule. |
+| `write_capacity` | A capacity below a night's reserved rooms is 409 and changes nothing; equal is accepted; an increase and a decrease apply to the next reservations (8 probes); capacity 0 hides a hotel from search within the bound and restoring it shows it again. |
+| `write_hotel_addition` | A hotel rated above and priced below every other appears in search, the three recommendations, `/rates` and reservations within the bound; a second one next to it joins the search; a taken ID is 409 and an invalid one 400. |
+| `durable_writes` | After crash and start, every write above is served again (no restarted cache or index brings an old value back), and capacities still hold. Needs the lifecycle hooks. |
+
+Repeated reads are the replica check: internal calls round-robin over the
+instances of a service, so 8 reads reach both instances of a two-replica
+service unless the same one is chosen 8 times. The tests run the check against
+a two-replica fake whose second replica never sees one kind of write, and
+expect it to fail.
 
 ## Opt-in properties the pinned reference violates
 

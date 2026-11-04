@@ -150,10 +150,21 @@ func (a *Application) Check(
 			return err
 		}
 	}
-	if check.Crash == nil || check.Start == nil {
-		return nil
+	lifecycle := check.Crash != nil && check.Start != nil
+	if lifecycle {
+		if err := a.verifyLifecycle(ctx, c, check, random, recorder); err != nil {
+			return err
+		}
 	}
-	checks, err = a.verifyCrashRecovery(ctx, c, check.Seed, random, check.Crash, check.Start)
+	// The write checks change seeded data the checks above expect, so they
+	// run last.
+	return a.verifyWrites(ctx, c, check, random, recorder, lifecycle)
+}
+
+func (a *Application) verifyLifecycle(
+	ctx context.Context, c client, check api.AccuracyContext, random *rand.Rand, recorder api.AccuracyRecorder,
+) error {
+	checks, err := a.verifyCrashRecovery(ctx, c, check.Seed, random, check.Crash, check.Start)
 	recorder.AddChecks(checks)
 	if err != nil {
 		return err

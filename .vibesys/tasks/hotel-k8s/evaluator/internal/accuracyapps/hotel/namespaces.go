@@ -15,6 +15,8 @@ const (
 	degenerateOffset          = 2700
 	multiNightOffset          = 2800
 	livenessOffset            = 2900
+	// The write checks own writesOffset .. writesOffset+8.
+	writesOffset = 3100
 )
 
 func namespacedNight(seed int64, dayOffset int) [2]string {
