@@ -2,8 +2,17 @@
 
 The Hotel accuracy adapter owns an independent compatibility oracle for the
 pinned DeathStarBench Hotel Reservation API. Existing targeted checks validate
-strict response schemas, seed catalogs, negative requests, state transitions,
-and managed crash recovery.
+strict response schemas, the seeded catalog, negative requests, state
+transitions, and managed crash recovery.
+
+The seeded data is the task's generated dataset (`internal/dataset`, written
+by the seed Job). Its read-only answers come from `hotelsupport.Reference`:
+search candidates are the geo service's go-geoindex answer (the 5 nearest
+hotels within 10 km, approximate, reproduced exactly) restricted to hotels
+with rate plans; recommendations are the global nearest, best-rated and
+cheapest hotels; logins and capacities are the dataset's. Checks sample
+hotels and users from the dataset (80 distance probes at hotel coordinates,
+fuzzed searches within about 100 m of random hotels on rate-window dates).
 
 `hotelOracle` is the canonical application-specific reference behavior. Given a
 logical `hotelState` and one `differentialAction`, its `Step` method returns the

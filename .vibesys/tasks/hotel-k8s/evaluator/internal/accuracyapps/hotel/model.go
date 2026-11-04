@@ -2,7 +2,6 @@ package hotel
 
 import (
 	"fmt"
-	"math"
 	"slices"
 	"strconv"
 	"time"
@@ -21,20 +20,12 @@ type hotelState struct {
 // pinned Hotel Reservation application. The generic accuracy framework owns
 // event scheduling and comparison; this type owns only Hotel semantics.
 type hotelOracle struct {
-	catalog map[string]profile
-	users   map[string]string
+	catalog   map[string]profile
+	reference *hotelsupport.Reference
 }
 
 func newHotelOracle(catalog map[string]profile) (*hotelOracle, error) {
-	users := make(map[string]string, 501)
-	for index := 0; index <= 500; index++ {
-		username, password, err := hotelsupport.User(index)
-		if err != nil {
-			return nil, err
-		}
-		users[username] = password
-	}
-	return &hotelOracle{catalog: catalog, users: users}, nil
+	return &hotelOracle{catalog: catalog, reference: hotelsupport.DefaultReference()}, nil
 }
 
 func (*hotelOracle) Initial() (hotelState, error) {
@@ -122,9 +113,9 @@ func (o *hotelOracle) login(query map[string]string) differentialObservation {
 func (o *hotelOracle) recommend(query map[string]string) (differentialObservation, error) {
 	switch query["require"] {
 	case "price":
-		return hotelIDsObservation("2"), nil
+		return hotelIDsObservation(o.reference.Cheapest()...), nil
 	case "rate":
-		return hotelIDsObservation("9", "24", "39", "54", "69"), nil
+		return hotelIDsObservation(o.reference.BestRated()...), nil
 	case "dis":
 		lat, err := strconv.ParseFloat(query["lat"], 64)
 		if err != nil {
@@ -134,19 +125,11 @@ func (o *hotelOracle) recommend(query map[string]string) (differentialObservatio
 		if err != nil {
 			return differentialObservation{}, fmt.Errorf("parse recommendation longitude: %w", err)
 		}
-		nearest := ""
-		nearestDistance := math.MaxFloat64
-		for id, item := range o.catalog {
-			distance := math.Hypot(item.recommendLat-lat, item.recommendLon-lon)
-			if distance < nearestDistance {
-				nearest = id
-				nearestDistance = distance
-			}
-		}
-		if nearest == "" {
+		nearest := o.reference.NearestHotels(lat, lon)
+		if len(nearest) == 0 {
 			return differentialObservation{}, fmt.Errorf("Hotel catalog is empty")
 		}
-		return hotelIDsObservation(nearest), nil
+		return hotelIDsObservation(nearest...), nil
 	default:
 		return differentialObservation{}, fmt.Errorf(
 			"unsupported recommendation requirement %q", query["require"],
@@ -187,13 +170,24 @@ func (o *hotelOracle) reserve(state hotelState, query map[string]string) (differ
 	return messageObservation(reservationSuccess), nil
 }
 
+// search is geo's nearest hotels with rate plans (hotelsupport.Reference)
+// that have a room on every night of the stay.
 func (o *hotelOracle) search(state hotelState, query map[string]string) (differentialObservation, error) {
 	nights, err := reservationNights(query)
 	if err != nil {
 		return differentialObservation{}, err
 	}
-	available := make([]string, 0, len(rateBackedIDs()))
-	for _, hotelID := range sortedRateBackedIDs() {
+	candidates, exact, err := o.reference.SearchCandidates(query["lat"], query["lon"])
+	if err != nil {
+		return differentialObservation{}, err
+	}
+	if !exact {
+		return differentialObservation{}, fmt.Errorf(
+			"search location %s,%s ranks two hotels equally; the generator must avoid it", query["lat"], query["lon"],
+		)
+	}
+	available := make([]string, 0, len(candidates))
+	for _, hotelID := range candidates {
 		capacity, err := capacityForHotel(hotelID)
 		if err != nil {
 			return differentialObservation{}, err
@@ -215,7 +209,7 @@ func (o *hotelOracle) search(state hotelState, query map[string]string) (differe
 func reservationStateKey(hotelID, date string) string { return hotelID + ":" + date }
 
 func (o *hotelOracle) validCredentials(query map[string]string) bool {
-	return o.users[query["username"]] == query["password"] && query["username"] != ""
+	return query["username"] != "" && o.reference.ValidLogin(query["username"], query["password"])
 }
 
 func reservationNights(query map[string]string) ([]string, error) {
@@ -235,9 +229,5 @@ func reservationNights(query map[string]string) ([]string, error) {
 }
 
 func capacityForHotel(hotelID string) (int, error) {
-	numericID, err := strconv.Atoi(hotelID)
-	if err != nil {
-		return 0, fmt.Errorf("parse hotel ID %q: %w", hotelID, err)
-	}
-	return hotelsupport.Capacity(numericID)
+	return hotelsupport.Capacity(hotelID)
 }

@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"reflect"
 	"sort"
-	"strconv"
 
+	hotelsupport "vibesys/hotel-k8s-evaluator/internal/appsupport/hotel"
 	"vibesys/microservice-evaluator/api"
 )
 
@@ -148,9 +148,9 @@ func validateFeature(raw any) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("id must be a string")
 	}
-	expected, err := profileForID(id)
-	if err != nil {
-		return "", err
+	expected, ok := hotelsupport.DefaultReference().Hotel(id)
+	if !ok {
+		return "", fmt.Errorf("unknown Hotel profile ID %q", id)
 	}
 	properties, ok := feature["properties"].(map[string]any)
 	if !ok {
@@ -159,7 +159,7 @@ func validateFeature(raw any) (string, error) {
 	if keys := sortedKeys(properties); !reflect.DeepEqual(keys, []string{"name", "phone_number"}) {
 		return "", fmt.Errorf("property fields %v, want [name phone_number]", keys)
 	}
-	if properties["name"] != expected.name || properties["phone_number"] != expected.phoneNumber {
+	if properties["name"] != expected.Name || properties["phone_number"] != expected.Phone {
 		return "", fmt.Errorf("properties %v do not match catalog for hotel %s", properties, id)
 	}
 	geometry, ok := feature["geometry"].(map[string]any)
@@ -181,21 +181,11 @@ func validateFeature(raw any) (string, error) {
 	if !lonOK || !latOK || math.IsNaN(lon) || math.IsInf(lon, 0) || math.IsNaN(lat) || math.IsInf(lat, 0) {
 		return "", fmt.Errorf("coordinates must contain finite numbers")
 	}
-	wantLon := encodedFloat32(expected.lon)
-	wantLat := encodedFloat32(expected.lat)
+	wantLon, wantLat := hotelsupport.EncodedCoordinates(expected)
 	if lon != wantLon || lat != wantLat {
 		return "", fmt.Errorf("coordinates [%v %v], want catalog [%v %v]", lon, lat, wantLon, wantLat)
 	}
 	return id, nil
-}
-
-func encodedFloat32(value float32) float64 {
-	encoded := strconv.FormatFloat(float64(value), 'g', -1, 32)
-	parsed, err := strconv.ParseFloat(encoded, 64)
-	if err != nil {
-		panic(err)
-	}
-	return parsed
 }
 
 func decodeHTTPJSON(result api.ProtocolResult) (any, api.ValidationResult) {

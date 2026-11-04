@@ -139,7 +139,7 @@ func (s *Server) GetRates(ctx context.Context, req *pb.Request) (*pb.Result, err
 
 				// memcached miss, set up mongo connection
 				collection := s.MongoClient.Database("rate-db").Collection("inventory")
-				curr, err := collection.Find(context.TODO(), bson.D{})
+				curr, err := collection.Find(context.TODO(), bson.D{{Key: "hotelId", Value: id}})
 				if err != nil {
 					log.Error().Msgf("Failed get rate data: ", err)
 				}

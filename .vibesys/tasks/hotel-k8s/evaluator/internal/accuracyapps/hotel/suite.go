@@ -6,11 +6,11 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/rand"
-	"sort"
 	"strconv"
 	"time"
 
 	hotelsupport "vibesys/hotel-k8s-evaluator/internal/appsupport/hotel"
+	"vibesys/hotel-k8s-evaluator/internal/dataset"
 	"vibesys/microservice-evaluator/accuracy"
 	"vibesys/microservice-evaluator/api"
 )
@@ -193,15 +193,9 @@ func (a *Application) verifySearch(ctx context.Context, c client, random *rand.R
 		if err := checkContext(ctx); err != nil {
 			return checks, err
 		}
-		inDay := 9 + random.Intn(15)
-		outDay := inDay + 1 + random.Intn(24-inDay)
-		anchor := a.catalog[strconv.Itoa(7+random.Intn(74))]
-		jitter := func() float64 { return (random.Float64()*2 - 1) / 1000.0 }
-		query := map[string]string{
-			"inDate":  fmt.Sprintf("2015-04-%02d", inDay),
-			"outDate": fmt.Sprintf("2015-04-%02d", outDay),
-			"lat":     strconv.FormatFloat(anchor.recommendLat+jitter(), 'f', 6, 64),
-			"lon":     strconv.FormatFloat(anchor.recommendLon+jitter(), 'f', 6, 64),
+		query, expected, err := a.fuzzedSearch(random)
+		if err != nil {
+			return checks, err
 		}
 		if caseIndex%2 == 0 {
 			query["locale"] = "en"
@@ -211,7 +205,7 @@ func (a *Application) verifySearch(ctx context.Context, c client, random *rand.R
 		if err != nil {
 			return checks, err
 		}
-		if err := a.validateSearchSet(first); err != nil {
+		if err := a.validateSearchSet(first, expected); err != nil {
 			return checks, fmt.Errorf("fuzzed search case %d query %v: %w", caseIndex, query, err)
 		}
 		second, err := c.geoJSON(ctx, "/hotels", query)
@@ -219,7 +213,7 @@ func (a *Application) verifySearch(ctx context.Context, c client, random *rand.R
 		if err != nil {
 			return checks, err
 		}
-		if err := a.validateSearchSet(second); err != nil {
+		if err := a.validateSearchSet(second, expected); err != nil {
 			return checks, fmt.Errorf("warm fuzzed search case %d query %v: %w", caseIndex, query, err)
 		}
 		if err := sameIDs(first, second); err != nil {
@@ -229,29 +223,54 @@ func (a *Application) verifySearch(ctx context.Context, c client, random *rand.R
 	return checks, nil
 }
 
-func (a *Application) validateSearchSet(features map[string]feature) error {
+// fuzzedSearch draws a stay in the rate window (1-7 nights) and a location
+// within about 100 m of a random hotel, and the search answer the model
+// expects there. No check reserves inside the rate window, so every hotel is
+// available and the answer is geo's nearest rate-backed hotels.
+func (a *Application) fuzzedSearch(random *rand.Rand) (map[string]string, []string, error) {
+	nights := 1 + random.Intn(7)
+	start := dataset.RateWindowStart.AddDate(0, 0, random.Intn(dataset.RateWindowDays-nights+1))
+	oracle, err := newHotelOracle(a.catalog)
+	if err != nil {
+		return nil, nil, err
+	}
+	for attempt := 0; attempt < 16; attempt++ {
+		anchor := a.catalog[strconv.Itoa(1+random.Intn(len(a.catalog)))]
+		jitter := func() float64 { return (random.Float64()*2 - 1) / 1000.0 }
+		query := map[string]string{
+			"inDate":  start.Format(time.DateOnly),
+			"outDate": start.AddDate(0, 0, nights).Format(time.DateOnly),
+			"lat":     strconv.FormatFloat(anchor.recommendLat+jitter(), 'f', 6, 64),
+			"lon":     strconv.FormatFloat(anchor.recommendLon+jitter(), 'f', 6, 64),
+		}
+		observation, err := oracle.search(hotelState{Reserved: map[string]int{}}, query)
+		if err != nil {
+			continue // an ambiguous location; draw another
+		}
+		return query, observation.HotelIDs, nil
+	}
+	return nil, nil, fmt.Errorf("no unambiguous search location in 16 draws")
+}
+
+func (a *Application) validateSearchSet(features map[string]feature, expected []string) error {
 	if err := validateProfiles(features, a.catalog, "canonical search"); err != nil {
 		return err
 	}
-	expected := rateBackedIDs()
-	ids := make([]string, 0, len(expected))
-	for id := range expected {
-		ids = append(ids, id)
-	}
-	if err := exactIDs(features, ids...); err != nil {
-		return fmt.Errorf("rate-backed result set: %w", err)
+	if err := exactIDs(features, expected...); err != nil {
+		return fmt.Errorf("nearby rate-backed result set: %w", err)
 	}
 	return nil
 }
 
 func (a *Application) verifyRecommendations(ctx context.Context, c client, random *rand.Rand) (int, error) {
 	checks := 0
+	reference := hotelsupport.DefaultReference()
 	queries := []struct {
 		require string
 		ids     []string
 	}{
-		{require: "price", ids: []string{"2"}},
-		{require: "rate", ids: []string{"9", "24", "39", "54", "69"}},
+		{require: "price", ids: reference.Cheapest()},
+		{require: "rate", ids: reference.BestRated()},
 	}
 	for queryIndex, item := range queries {
 		query := map[string]string{"require": item.require, "lat": "37.7749", "lon": "-122.4194"}
@@ -271,28 +290,24 @@ func (a *Application) verifyRecommendations(ctx context.Context, c client, rando
 		}
 	}
 
-	// Query every seeded coordinate in randomized order. This makes the 80-row
-	// catalog observable and proves that distance recommendation returns the
-	// unique exact-location hotel, rather than merely accepting a known subset.
-	ids := make([]int, 80)
-	for index := range ids {
-		ids[index] = index + 1
-	}
-	random.Shuffle(len(ids), func(left, right int) { ids[left], ids[right] = ids[right], ids[left] })
-	for _, numericID := range ids {
+	// Query the exact coordinates of randomly chosen seeded hotels: distance
+	// recommendation must return the hotel at that location (the model scans
+	// every hotel, so it also states the answer if two hotels shared it).
+	sampled := 80
+	for caseIndex := 0; caseIndex < sampled; caseIndex++ {
 		if err := checkContext(ctx); err != nil {
 			return checks, err
 		}
-		id := strconv.Itoa(numericID)
-		expected := a.catalog[id]
+		expected := a.catalog[strconv.Itoa(1+random.Intn(len(a.catalog)))]
 		query := map[string]string{
 			"require": "dis",
 			"lat":     strconv.FormatFloat(expected.recommendLat, 'f', -1, 64),
 			"lon":     strconv.FormatFloat(expected.recommendLon, 'f', -1, 64),
 		}
-		if numericID%2 == 0 {
+		if caseIndex%2 == 0 {
 			query["locale"] = "en"
 		}
+		want := reference.NearestHotels(expected.recommendLat, expected.recommendLon)
 		features, err := c.geoJSON(ctx, "/recommendations", query)
 		checks++
 		if err != nil {
@@ -301,29 +316,29 @@ func (a *Application) verifyRecommendations(ctx context.Context, c client, rando
 		if err := validateProfiles(features, a.catalog, "distance recommendation"); err != nil {
 			return checks, err
 		}
-		if err := exactIDs(features, id); err != nil {
-			return checks, fmt.Errorf("distance recommendation at hotel %s coordinates: %w", id, err)
+		if err := exactIDs(features, want...); err != nil {
+			return checks, fmt.Errorf("distance recommendation at hotel %s coordinates: %w", expected.id, err)
 		}
 	}
 
-	// Probe non-catalog coordinates that are derived from the runtime seed.
-	// Each point stays within a tiny neighborhood of a generated hotel, whose
-	// nearest-neighbor margin is much larger than the jitter. This frustrates
-	// lookup tables keyed only by the 80 public seed coordinates while keeping
-	// the oracle independent and unambiguous.
-	for caseIndex := 0; caseIndex < 2*max(4, len(ids)/20); caseIndex++ {
-		numericID := 7 + random.Intn(74)
-		id := strconv.Itoa(numericID)
-		expected := a.catalog[id]
-		jitter := func() float64 { return (random.Float64()*2 - 1) / 100000.0 }
+	// Probe non-catalog coordinates derived from the runtime seed, within a
+	// few hundred metres of a random hotel; the model computes the answer.
+	for caseIndex := 0; caseIndex < 2*max(4, sampled/20); caseIndex++ {
+		anchor := a.catalog[strconv.Itoa(1+random.Intn(len(a.catalog)))]
+		jitter := func() float64 { return (random.Float64()*2 - 1) / 300.0 }
+		lat := anchor.recommendLat + jitter()
+		lon := anchor.recommendLon + jitter()
 		query := map[string]string{
 			"require": "dis",
-			"lat":     strconv.FormatFloat(expected.recommendLat+jitter(), 'f', 8, 64),
-			"lon":     strconv.FormatFloat(expected.recommendLon+jitter(), 'f', 8, 64),
+			"lat":     strconv.FormatFloat(lat, 'f', 8, 64),
+			"lon":     strconv.FormatFloat(lon, 'f', 8, 64),
 		}
 		if caseIndex%2 == 0 {
 			query["locale"] = "en"
 		}
+		parsedLat, _ := strconv.ParseFloat(query["lat"], 64)
+		parsedLon, _ := strconv.ParseFloat(query["lon"], 64)
+		want := reference.NearestHotels(parsedLat, parsedLon)
 		features, err := c.geoJSON(ctx, "/recommendations", query)
 		checks++
 		if err != nil {
@@ -332,8 +347,8 @@ func (a *Application) verifyRecommendations(ctx context.Context, c client, rando
 		if err := validateProfiles(features, a.catalog, "fuzzed distance recommendation"); err != nil {
 			return checks, err
 		}
-		if err := exactIDs(features, id); err != nil {
-			return checks, fmt.Errorf("fuzzed distance recommendation near hotel %s: %w", id, err)
+		if err := exactIDs(features, want...); err != nil {
+			return checks, fmt.Errorf("fuzzed distance recommendation near hotel %s: %w", anchor.id, err)
 		}
 	}
 	return checks, nil
@@ -341,16 +356,13 @@ func (a *Application) verifyRecommendations(ctx context.Context, c client, rando
 
 func (a *Application) verifyAuthentication(ctx context.Context, c client, random *rand.Rand, cases int) (int, error) {
 	checks := 0
-	indices := random.Perm(501)
+	indices := random.Perm(hotelsupport.UserCount())
 	for caseIndex := 0; caseIndex < cases; caseIndex++ {
 		index := indices[caseIndex%len(indices)]
 		if err := checkContext(ctx); err != nil {
 			return checks, err
 		}
-		username, password, err := hotelsupport.User(index)
-		if err != nil {
-			return checks, err
-		}
+		username, password := hotelsupport.User(index)
 		if err := c.exactMessage(ctx, "/user", credentials(username, password), loginSuccess); err != nil {
 			return checks + 1, fmt.Errorf("valid seed user %d: %w", index, err)
 		}
@@ -360,14 +372,14 @@ func (a *Application) verifyAuthentication(ctx context.Context, c client, random
 		}
 		checks++
 	}
-	if err := c.exactMessage(ctx, "/user", credentials("Cornell_nonexistent", "not-a-password"), loginFailure); err != nil {
+	if err := c.exactMessage(ctx, "/user", credentials(fmt.Sprintf("nobody-%016x", random.Uint64()), "not-a-password"), loginFailure); err != nil {
 		return checks + 1, fmt.Errorf("nonexistent user: %w", err)
 	}
 	return checks + 1, nil
 }
 
 func (a *Application) verifyNegativeCases(ctx context.Context, c client, random *rand.Rand) (int, error) {
-	username, password := hotelsupport.MustUser(0)
+	username, password := hotelsupport.User(0)
 	checks := 0
 	reservationBase := map[string]string{
 		"inDate": "3000-01-01", "outDate": "3000-01-02", "hotelId": "1",
@@ -406,15 +418,15 @@ func (a *Application) verifyOptionalReservationNumber(
 	seed int64,
 	random *rand.Rand,
 ) (int, error) {
-	username, password := hotelsupport.MustUser(0)
-	hotelID := 1 + random.Intn(80)
+	username, password := hotelsupport.User(0)
+	hotelID := strconv.Itoa(1 + random.Intn(len(a.catalog)))
 	capacity, err := hotelsupport.Capacity(hotelID)
 	if err != nil {
 		return 0, err
 	}
 	start := reservationDate(seed).AddDate(0, 0, 180)
 	query := credentials(username, password)
-	query["hotelId"] = strconv.Itoa(hotelID)
+	query["hotelId"] = hotelID
 	query["inDate"] = start.Format(time.DateOnly)
 	query["outDate"] = start.AddDate(0, 0, 1).Format(time.DateOnly)
 	query["customerName"] = "optional-number"
@@ -440,11 +452,10 @@ func (a *Application) verifySearchAvailability(
 	seed int64,
 	random *rand.Rand,
 ) (int, error) {
-	username, password := hotelsupport.MustUser(0)
+	username, password := hotelsupport.User(0)
 	rateIDs := sortedRateBackedIDs()
 	hotelID := rateIDs[random.Intn(len(rateIDs))]
-	numericID, _ := strconv.Atoi(hotelID)
-	capacity, err := hotelsupport.Capacity(numericID)
+	capacity, err := hotelsupport.Capacity(hotelID)
 	if err != nil {
 		return 0, err
 	}
@@ -481,13 +492,23 @@ func (a *Application) verifySearchAvailability(
 	if err := validateProfiles(reserved, a.catalog, "reserved-date search"); err != nil {
 		return 3, err
 	}
-	wanted := make([]string, 0, len(rateIDs)-1)
-	for _, id := range rateIDs {
-		if id != hotelID {
-			wanted = append(wanted, id)
+	oracle, err := newHotelOracle(a.catalog)
+	if err != nil {
+		return 3, err
+	}
+	filled := hotelState{Reserved: map[string]int{reservationStateKey(hotelID, reservedDate[0]): capacity}}
+	searchAt := func(date [2]string) map[string]string {
+		return map[string]string{
+			"inDate": date[0], "outDate": date[1],
+			"lat": strconv.FormatFloat(anchor.recommendLat, 'f', -1, 64),
+			"lon": strconv.FormatFloat(anchor.recommendLon, 'f', -1, 64),
 		}
 	}
-	if err := exactIDs(reserved, wanted...); err != nil {
+	wanted, err := oracle.search(filled, searchAt(reservedDate))
+	if err != nil {
+		return 3, err
+	}
+	if err := exactIDs(reserved, wanted.HotelIDs...); err != nil {
 		return 3, fmt.Errorf("reserved-date search for filled hotel %s: %w", hotelID, err)
 	}
 	adjacentDate := [2]string{
@@ -501,23 +522,21 @@ func (a *Application) verifySearchAvailability(
 	if err := validateProfiles(adjacent, a.catalog, "adjacent-date search"); err != nil {
 		return 4, err
 	}
-	if err := exactIDs(adjacent, rateIDs...); err != nil {
+	wantedAdjacent, err := oracle.search(filled, searchAt(adjacentDate))
+	if err != nil {
+		return 4, err
+	}
+	if err := exactIDs(adjacent, wantedAdjacent.HotelIDs...); err != nil {
 		return 4, fmt.Errorf("adjacent-date search after filling hotel %s: %w", hotelID, err)
 	}
-	return 4, nil
-}
-
-func sortedRateBackedIDs() []string {
-	ids := make([]string, 0, len(rateBackedIDs()))
-	for id := range rateBackedIDs() {
-		ids = append(ids, id)
+	found := false
+	for _, id := range wantedAdjacent.HotelIDs {
+		found = found || id == hotelID
 	}
-	sort.Slice(ids, func(left, right int) bool {
-		leftID, _ := strconv.Atoi(ids[left])
-		rightID, _ := strconv.Atoi(ids[right])
-		return leftID < rightID
-	})
-	return ids
+	if !found {
+		return 4, fmt.Errorf("model: hotel %s is not in the search at its own location", hotelID)
+	}
+	return 4, nil
 }
 
 func (a *Application) verifyReservations(
@@ -527,7 +546,7 @@ func (a *Application) verifyReservations(
 	cases int,
 	random *rand.Rand,
 ) (int, error) {
-	username, password := hotelsupport.MustUser(0)
+	username, password := hotelsupport.User(0)
 	start := reservationDate(seed)
 	checks := 0
 	reserve := func(hotelID string, date [2]string, rooms int, customer, expected string) error {
@@ -544,13 +563,14 @@ func (a *Application) verifyReservations(
 	// The endpoint has no delete operation. Use shuffled hotel pairs and
 	// hash-namespaced, disjoint future date slots so each case is independent
 	// without claiming cleanup that the application cannot perform.
-	hotelOrder := random.Perm(80)
+	hotelIDs := sortedRateBackedIDs()
+	hotelOrder := random.Perm(len(hotelIDs))
 	for caseIndex := 0; caseIndex < cases; caseIndex++ {
 		if err := checkContext(ctx); err != nil {
 			return checks, err
 		}
-		primaryID := 1 + hotelOrder[(caseIndex*2)%len(hotelOrder)]
-		isolationID := 1 + hotelOrder[(caseIndex*2+1)%len(hotelOrder)]
+		primary := hotelIDs[hotelOrder[(caseIndex*2)%len(hotelOrder)]]
+		isolation := hotelIDs[hotelOrder[(caseIndex*2+1)%len(hotelOrder)]]
 		caseStart := start.AddDate(0, 0, caseIndex*4)
 		exactDate := [2]string{
 			caseStart.Format("2006-01-02"),
@@ -560,9 +580,7 @@ func (a *Application) verifyReservations(
 			caseStart.AddDate(0, 0, 2).Format("2006-01-02"),
 			caseStart.AddDate(0, 0, 3).Format("2006-01-02"),
 		}
-		primary := strconv.Itoa(primaryID)
-		isolation := strconv.Itoa(isolationID)
-		capacity, err := hotelsupport.Capacity(primaryID)
+		capacity, err := hotelsupport.Capacity(primary)
 		if err != nil {
 			return checks, err
 		}
@@ -594,11 +612,10 @@ func (a *Application) verifyCrashRecovery(
 	crash func(context.Context) error,
 	startCandidate func(context.Context) error,
 ) (int, error) {
-	username, password := hotelsupport.MustUser(0)
+	username, password := hotelsupport.User(0)
 	rateIDs := sortedRateBackedIDs()
 	hotelID := rateIDs[random.Intn(len(rateIDs))]
-	numericID, _ := strconv.Atoi(hotelID)
-	capacity, err := hotelsupport.Capacity(numericID)
+	capacity, err := hotelsupport.Capacity(hotelID)
 	if err != nil {
 		return 0, err
 	}

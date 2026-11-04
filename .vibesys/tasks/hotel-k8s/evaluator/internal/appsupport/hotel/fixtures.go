@@ -1,41 +1,17 @@
 package hotel
 
-import (
-	"encoding/hex"
-	"fmt"
-	"strconv"
-	"strings"
-)
+import "vibesys/hotel-k8s-evaluator/internal/dataset"
 
-// User reproduces the current DeathStarBench seed grammar. The hexadecimal
-// username is intentional: cmd/user/db.go applies %x to the decimal suffix's
-// bytes, so account zero is Cornell_30 rather than Cornell_0.
-func User(index int) (username string, password string, err error) {
-	if index < 0 || index > 500 {
-		return "", "", fmt.Errorf("Hotel seed user index must be in [0, 500], got %d", index)
-	}
-	suffix := strconv.Itoa(index)
-	return "Cornell_" + hex.EncodeToString([]byte(suffix)), strings.Repeat(suffix, 10), nil
+// User returns seeded account index (modulo the number of users) of the
+// task's dataset: its username and plaintext password.
+func User(index int) (username string, password string) {
+	return DefaultReference().User(index)
 }
 
-func MustUser(index int) (string, string) {
-	username, password, err := User(index)
-	if err != nil {
-		panic(err)
-	}
-	return username, password
-}
+// UserCount is the number of seeded accounts.
+func UserCount() int { return len(dataset.Default().Users) }
 
-// Capacity returns the immutable seeded room capacity for one hotel.
-func Capacity(hotelID int) (int, error) {
-	if hotelID < 1 || hotelID > 80 {
-		return 0, fmt.Errorf("Hotel seed hotel ID must be in [1, 80], got %d", hotelID)
-	}
-	if hotelID <= 6 || hotelID%3 == 0 {
-		return 200, nil
-	}
-	if hotelID%3 == 1 {
-		return 300, nil
-	}
-	return 250, nil
+// Capacity returns the seeded room capacity of one hotel.
+func Capacity(hotelID string) (int, error) {
+	return DefaultReference().Capacity(hotelID)
 }
