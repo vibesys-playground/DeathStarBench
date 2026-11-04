@@ -36,6 +36,12 @@ type Options struct {
 	LosePostsOnRestart bool
 	// IgnoreUnfollow acknowledges unfollows without applying them.
 	IgnoreUnfollow bool
+	// FollowerCache models the pinned social graph service's Redis cache of
+	// follower sets: fan-out reads the cached set when it is non-empty and
+	// fills it from the store otherwise, a follow adds to the cached set
+	// whether or not it was cached, and a flush of social-graph-redis
+	// empties the cache. A follow after a flush thus leaves a partial set.
+	FollowerCache bool
 }
 
 type post struct {
@@ -51,27 +57,28 @@ type post struct {
 
 // App is the fake application.
 type App struct {
-	options  Options
-	mu       sync.Mutex
-	names    map[int64]string
-	ids      map[string]int64
-	follows  map[int64]map[int64]bool // follower -> followees
-	posts    map[int64]*post
-	user     map[int64][]int64 // newest first
-	home     map[int64][]int64
-	cache    map[string][]byte
-	replica  int
-	nextID   int64
-	clock    int64
-	random   *rand.Rand
-	Requests int
+	options       Options
+	mu            sync.Mutex
+	names         map[int64]string
+	ids           map[string]int64
+	follows       map[int64]map[int64]bool // follower -> followees
+	posts         map[int64]*post
+	user          map[int64][]int64 // newest first
+	home          map[int64][]int64
+	cache         map[string][]byte
+	followerCache map[int64]map[int64]bool // author -> followers
+	replica       int
+	nextID        int64
+	clock         int64
+	random        *rand.Rand
+	Requests      int
 }
 
 // New returns a fake holding data (nil: empty).
 func New(data *dataset.Dataset, options Options) *App {
 	app := &App{
 		options: options, names: map[int64]string{}, ids: map[string]int64{}, follows: map[int64]map[int64]bool{},
-		posts: map[int64]*post{}, user: map[int64][]int64{}, home: map[int64][]int64{}, cache: map[string][]byte{},
+		posts: map[int64]*post{}, user: map[int64][]int64{}, home: map[int64][]int64{}, cache: map[string][]byte{}, followerCache: map[int64]map[int64]bool{},
 		nextID: 1 << 50, random: rand.New(rand.NewSource(1)),
 	}
 	if data == nil {
@@ -142,11 +149,14 @@ func (a *App) Restart(string) {
 }
 
 // Flush models a cache flush.
-func (a *App) Flush(string) {
+func (a *App) Flush(cache string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.options.LoseHomeOnFlush {
 		a.home = map[int64][]int64{}
+	}
+	if cache == "social-graph-redis" {
+		a.followerCache = map[int64]map[int64]bool{}
 	}
 }
 
@@ -210,8 +220,15 @@ func (a *App) follow(writer http.ResponseWriter, form map[string][]string, follo
 	}
 	if follow {
 		a.follows[u][v] = true
+		if a.options.FollowerCache {
+			if a.followerCache[v] == nil {
+				a.followerCache[v] = map[int64]bool{}
+			}
+			a.followerCache[v][u] = true
+		}
 	} else if !a.options.IgnoreUnfollow {
 		delete(a.follows[u], v)
+		delete(a.followerCache[v], u)
 	}
 	fmt.Fprintln(writer, "Success!")
 }
@@ -268,9 +285,20 @@ func (a *App) compose(writer http.ResponseWriter, form map[string][]string) {
 	a.posts[p.id] = p
 	a.user[author] = insert(a.user[author], p.id, a.posts)
 	var recipients []int64
-	for follower, followees := range a.follows {
-		if followees[author] {
+	if cached := a.followerCache[author]; a.options.FollowerCache && len(cached) > 0 {
+		for follower := range cached {
 			recipients = append(recipients, follower)
+		}
+	} else {
+		filled := map[int64]bool{}
+		for follower, followees := range a.follows {
+			if followees[author] {
+				recipients = append(recipients, follower)
+				filled[follower] = true
+			}
+		}
+		if a.options.FollowerCache {
+			a.followerCache[author] = filled
 		}
 	}
 	recipients = append(recipients, p.mentions...)

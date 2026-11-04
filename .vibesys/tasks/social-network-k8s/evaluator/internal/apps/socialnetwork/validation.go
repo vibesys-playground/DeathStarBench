@@ -126,7 +126,7 @@ func (a *Application) checkTimeline(kind string, user int32, start int, body []b
 			if !allowed {
 				return fmt.Errorf("unexpected: %s does not belong in this timeline", timeline.Describe(post))
 			}
-			expected := seededWire(a.data, seeded)
+			expected := timeline.Seeded(a.data, seeded)
 			if !timeline.Same(&expected, post) {
 				return fmt.Errorf("content: %s differs from the stored %s", timeline.Describe(post), timeline.Describe(&expected))
 			}
@@ -162,7 +162,7 @@ func (a *Application) checkTimeline(kind string, user int32, start int, body []b
 	return timeline.Window(window, posts, matched, start, start+PageSize, func(index int) string {
 		c := candidates[index]
 		if c.seeded >= 0 {
-			wire := seededWire(a.data, c.seeded)
+			wire := timeline.Seeded(a.data, c.seeded)
 			return timeline.Describe(&wire)
 		}
 		if c.live.learned != nil {

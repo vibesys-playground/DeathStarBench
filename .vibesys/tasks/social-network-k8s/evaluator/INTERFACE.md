@@ -41,10 +41,13 @@ nginx URL and the restart hook).
 
 ## `seed`: write the task's dataset into the data tier
 
-The dataset (about 20k users, 0.4M follow edges, 0.1M posts, 2M home-timeline
-entries; exact counts in the summary) cannot be loaded through the API in a
-reasonable time (estimate in the evaluator README), and the API would assign
-post ids, request ids and timestamps itself. `seed` therefore writes the
+The dataset (20,000 users, 293,926 follow edges, 91,490 posts, 1,322,202
+home-timeline entries; digest af53262d...; exact counts in the summary)
+cannot be loaded through the API in a reasonable time (estimate in the
+evaluator README), and the API would assign post ids, request ids and
+timestamps itself. Written directly it takes about 4 s (measured against
+local mongo/redis containers); Redis needs about 85 MB for home timelines and
+20 MB for the social graph, post-storage MongoDB about 26 MB of documents. `seed` therefore writes the
 documents the services themselves write, with the same BSON types, directly:
 
     seed [--dataset-seed N] [--address NAME=HOST:PORT ...] [--timeout 10m]
@@ -96,7 +99,9 @@ ConfigMap mounted read-only) and passes `--state-in`. A phase run without
 seeded one; Prepare checks a sample of seeded timelines and fails fast if the
 deployment holds another dataset), `freshness_ms` (1000).
 
-Operations (all target `gateway`): `user_timeline_read`, `home_timeline_read`,
+`loadgen` implements the readiness probes, so `--startup-timeout` waits for
+nginx (a read of a non-dataset user, id 2999999999). Operations (all target
+`gateway`): `user_timeline_read`, `home_timeline_read`,
 `compose_post` (compose, then read the author's user timeline: read your
 write), `follow`, `unfollow`. Repetitions > 1 are allowed; the model carries
 over between trials of one process.
@@ -106,13 +111,14 @@ over between trials of one process.
     checker --base-url URL --seed N|random --restart-command-json '["...", ...]'
             [--deployments a,b,...] [--caches a,b,...] [--dataset-seed N]
             [--skip-dataset] [--freshness-ms 1000] [--replica-reads 12]
+            [--skip-follow-after-flush]
 
-Exit 0: every check passed; 1: a check failed; 2: usage or setup error (for
-example the hook failed or the app is unreachable). One line per check on
+Exit 0: every check passed; 1: a check failed (a failing restart hook fails
+the durability check); 2: usage or setup error (the app is unreachable). One line per check on
 stdout (`PASS name` / `FAIL name: detail`), then one JSON summary line.
 
-The checker creates its own users (ids and names derived from the seed, far
-from the dataset's), never follows or mentions dataset users, and reads the
+The checker creates its own users (ids from 3,000,000,000 and names derived
+from the seed, far from the dataset's 1..20000), never follows or mentions dataset users, and reads the
 dataset only, so it can run before or after a benchmark phase; with the
 dataset check (the default) it must run on a freshly seeded deployment that no
 benchmark has written to (`--skip-dataset` otherwise).
@@ -130,6 +136,15 @@ waits for it to exit 0:
 `post-storage-memcached,user-memcached,url-shorten-memcached,media-memcached,user-timeline-redis,social-graph-redis`.
 `home-timeline-redis` is the only store of home timelines in the pinned app,
 so it is not a cache and is never flushed.
+
+After each flush the checker first has a new user follow an existing user,
+before anything reads the flushed state, then composes as the followee. The
+pinned social-graph service fails this after a `social-graph-redis` flush:
+`Follow` ZADDs into `<id>:followers` whether or not the set is cached, and
+`GetFollowers` treats any non-empty cached set as complete, so the older
+followers stop receiving posts. Fix in the base (e.g. update the cached sets
+only if they exist, or delete them on follow/unfollow), or run with
+`--skip-follow-after-flush` until then.
 
 ## The contract the checker and the benchmark validation enforce
 
