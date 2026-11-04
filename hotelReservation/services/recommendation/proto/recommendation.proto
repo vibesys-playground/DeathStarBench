@@ -7,6 +7,8 @@ option go_package = "github.com/delimitrou/DeathStarBench/tree/master/hotelReser
 service Recommendation {
   // GetRecommendations returns recommended hotels for a given requirement
   rpc GetRecommendations(Request) returns (Result);
+  // AddHotel stores the recommendation attributes of a new hotel.
+  rpc AddHotel(Hotel) returns (AddResult);
 }
 
 // The requirement of the recommendation.
@@ -19,3 +21,13 @@ message Request {
 message Result {
   repeated string HotelIds = 1;
 }
+
+message Hotel {
+  string hotelId = 1;
+  double lat = 2;
+  double lon = 3;
+  double rate = 4;
+  double price = 5;
+}
+
+message AddResult {}

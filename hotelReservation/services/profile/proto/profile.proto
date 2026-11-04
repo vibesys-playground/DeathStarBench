@@ -6,6 +6,12 @@ option go_package = "github.com/delimitrou/DeathStarBench/tree/master/hotelReser
 
 service Profile {
   rpc GetProfiles(Request) returns (Result);
+  // UpdateProfile changes the non-empty fields of a hotel's profile
+  // (NOT_FOUND for an unknown hotel).
+  rpc UpdateProfile(UpdateRequest) returns (UpdateResult);
+  // AddProfile stores the profile of a new hotel (ALREADY_EXISTS if the ID is
+  // taken).
+  rpc AddProfile(Hotel) returns (UpdateResult);
 }
 
 message Request {
@@ -41,3 +47,11 @@ message Image {
   string url = 1;
   bool default = 2;
 }
+
+message UpdateRequest {
+  string hotelId = 1;
+  string name = 2;
+  string phoneNumber = 3;
+}
+
+message UpdateResult {}

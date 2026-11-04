@@ -9,6 +9,11 @@ service Reservation {
   rpc MakeReservation(Request) returns (Result);
   // CheckAvailability checks if given information is available
   rpc CheckAvailability(Request) returns (Result);
+  // SetCapacity sets a hotel's number of rooms (NOT_FOUND for an unknown
+  // hotel, FAILED_PRECONDITION if a night already holds more reserved rooms).
+  rpc SetCapacity(CapacityRequest) returns (CapacityResult);
+  // AddCapacity stores the number of rooms of a new hotel.
+  rpc AddCapacity(CapacityRequest) returns (CapacityResult);
 }
 
 message Request {
@@ -21,4 +26,13 @@ message Request {
 
 message Result {
   repeated string hotelId = 1;
+}
+message CapacityRequest {
+  string hotelId = 1;
+  int32 rooms = 2;
+}
+
+message CapacityResult {
+  // maxReserved is the most rooms reserved on any night of the hotel.
+  int32 maxReserved = 1;
 }

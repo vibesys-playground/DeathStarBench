@@ -19,7 +19,9 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	Rate_GetRates_FullMethodName = "/rate.Rate/GetRates"
+	Rate_GetRates_FullMethodName   = "/rate.Rate/GetRates"
+	Rate_UpdateRate_FullMethodName = "/rate.Rate/UpdateRate"
+	Rate_AddRates_FullMethodName   = "/rate.Rate/AddRates"
 )
 
 // RateClient is the client API for Rate service.
@@ -28,6 +30,11 @@ const (
 type RateClient interface {
 	// GetRates returns rate codes for hotels for a given date range
 	GetRates(ctx context.Context, in *Request, opts ...grpc.CallOption) (*Result, error)
+	// UpdateRate sets the prices of one rate plan of a hotel (NOT_FOUND if the
+	// hotel has no plan with that code).
+	UpdateRate(ctx context.Context, in *UpdateRateRequest, opts ...grpc.CallOption) (*UpdateRateResult, error)
+	// AddRates stores the rate plans of a new hotel.
+	AddRates(ctx context.Context, in *AddRatesRequest, opts ...grpc.CallOption) (*AddRatesResult, error)
 }
 
 type rateClient struct {
@@ -47,12 +54,35 @@ func (c *rateClient) GetRates(ctx context.Context, in *Request, opts ...grpc.Cal
 	return out, nil
 }
 
+func (c *rateClient) UpdateRate(ctx context.Context, in *UpdateRateRequest, opts ...grpc.CallOption) (*UpdateRateResult, error) {
+	out := new(UpdateRateResult)
+	err := c.cc.Invoke(ctx, Rate_UpdateRate_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *rateClient) AddRates(ctx context.Context, in *AddRatesRequest, opts ...grpc.CallOption) (*AddRatesResult, error) {
+	out := new(AddRatesResult)
+	err := c.cc.Invoke(ctx, Rate_AddRates_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RateServer is the server API for Rate service.
 // All implementations must embed UnimplementedRateServer
 // for forward compatibility
 type RateServer interface {
 	// GetRates returns rate codes for hotels for a given date range
 	GetRates(context.Context, *Request) (*Result, error)
+	// UpdateRate sets the prices of one rate plan of a hotel (NOT_FOUND if the
+	// hotel has no plan with that code).
+	UpdateRate(context.Context, *UpdateRateRequest) (*UpdateRateResult, error)
+	// AddRates stores the rate plans of a new hotel.
+	AddRates(context.Context, *AddRatesRequest) (*AddRatesResult, error)
 	mustEmbedUnimplementedRateServer()
 }
 
@@ -62,6 +92,12 @@ type UnimplementedRateServer struct {
 
 func (UnimplementedRateServer) GetRates(context.Context, *Request) (*Result, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetRates not implemented")
+}
+func (UnimplementedRateServer) UpdateRate(context.Context, *UpdateRateRequest) (*UpdateRateResult, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateRate not implemented")
+}
+func (UnimplementedRateServer) AddRates(context.Context, *AddRatesRequest) (*AddRatesResult, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AddRates not implemented")
 }
 func (UnimplementedRateServer) mustEmbedUnimplementedRateServer() {}
 
@@ -94,6 +130,42 @@ func _Rate_GetRates_Handler(srv interface{}, ctx context.Context, dec func(inter
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Rate_UpdateRate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateRateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RateServer).UpdateRate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Rate_UpdateRate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RateServer).UpdateRate(ctx, req.(*UpdateRateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Rate_AddRates_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddRatesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RateServer).AddRates(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Rate_AddRates_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RateServer).AddRates(ctx, req.(*AddRatesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Rate_ServiceDesc is the grpc.ServiceDesc for Rate service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -104,6 +176,14 @@ var Rate_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetRates",
 			Handler:    _Rate_GetRates_Handler,
+		},
+		{
+			MethodName: "UpdateRate",
+			Handler:    _Rate_UpdateRate_Handler,
+		},
+		{
+			MethodName: "AddRates",
+			Handler:    _Rate_AddRates_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

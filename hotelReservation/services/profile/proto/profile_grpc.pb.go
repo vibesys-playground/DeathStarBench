@@ -19,7 +19,9 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	Profile_GetProfiles_FullMethodName = "/profile.Profile/GetProfiles"
+	Profile_GetProfiles_FullMethodName   = "/profile.Profile/GetProfiles"
+	Profile_UpdateProfile_FullMethodName = "/profile.Profile/UpdateProfile"
+	Profile_AddProfile_FullMethodName    = "/profile.Profile/AddProfile"
 )
 
 // ProfileClient is the client API for Profile service.
@@ -27,6 +29,12 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type ProfileClient interface {
 	GetProfiles(ctx context.Context, in *Request, opts ...grpc.CallOption) (*Result, error)
+	// UpdateProfile changes the non-empty fields of a hotel's profile
+	// (NOT_FOUND for an unknown hotel).
+	UpdateProfile(ctx context.Context, in *UpdateRequest, opts ...grpc.CallOption) (*UpdateResult, error)
+	// AddProfile stores the profile of a new hotel (ALREADY_EXISTS if the ID is
+	// taken).
+	AddProfile(ctx context.Context, in *Hotel, opts ...grpc.CallOption) (*UpdateResult, error)
 }
 
 type profileClient struct {
@@ -46,11 +54,35 @@ func (c *profileClient) GetProfiles(ctx context.Context, in *Request, opts ...gr
 	return out, nil
 }
 
+func (c *profileClient) UpdateProfile(ctx context.Context, in *UpdateRequest, opts ...grpc.CallOption) (*UpdateResult, error) {
+	out := new(UpdateResult)
+	err := c.cc.Invoke(ctx, Profile_UpdateProfile_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *profileClient) AddProfile(ctx context.Context, in *Hotel, opts ...grpc.CallOption) (*UpdateResult, error) {
+	out := new(UpdateResult)
+	err := c.cc.Invoke(ctx, Profile_AddProfile_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ProfileServer is the server API for Profile service.
 // All implementations must embed UnimplementedProfileServer
 // for forward compatibility
 type ProfileServer interface {
 	GetProfiles(context.Context, *Request) (*Result, error)
+	// UpdateProfile changes the non-empty fields of a hotel's profile
+	// (NOT_FOUND for an unknown hotel).
+	UpdateProfile(context.Context, *UpdateRequest) (*UpdateResult, error)
+	// AddProfile stores the profile of a new hotel (ALREADY_EXISTS if the ID is
+	// taken).
+	AddProfile(context.Context, *Hotel) (*UpdateResult, error)
 	mustEmbedUnimplementedProfileServer()
 }
 
@@ -60,6 +92,12 @@ type UnimplementedProfileServer struct {
 
 func (UnimplementedProfileServer) GetProfiles(context.Context, *Request) (*Result, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetProfiles not implemented")
+}
+func (UnimplementedProfileServer) UpdateProfile(context.Context, *UpdateRequest) (*UpdateResult, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateProfile not implemented")
+}
+func (UnimplementedProfileServer) AddProfile(context.Context, *Hotel) (*UpdateResult, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AddProfile not implemented")
 }
 func (UnimplementedProfileServer) mustEmbedUnimplementedProfileServer() {}
 
@@ -92,6 +130,42 @@ func _Profile_GetProfiles_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Profile_UpdateProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProfileServer).UpdateProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Profile_UpdateProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProfileServer).UpdateProfile(ctx, req.(*UpdateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Profile_AddProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Hotel)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProfileServer).AddProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Profile_AddProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProfileServer).AddProfile(ctx, req.(*Hotel))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Profile_ServiceDesc is the grpc.ServiceDesc for Profile service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -102,6 +176,14 @@ var Profile_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetProfiles",
 			Handler:    _Profile_GetProfiles_Handler,
+		},
+		{
+			MethodName: "UpdateProfile",
+			Handler:    _Profile_UpdateProfile_Handler,
+		},
+		{
+			MethodName: "AddProfile",
+			Handler:    _Profile_AddProfile_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

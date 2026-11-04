@@ -7,6 +7,11 @@ option go_package = "github.com/delimitrou/DeathStarBench/tree/master/hotelReser
 service Rate {
   // GetRates returns rate codes for hotels for a given date range
   rpc GetRates(Request) returns (Result);
+  // UpdateRate sets the prices of one rate plan of a hotel (NOT_FOUND if the
+  // hotel has no plan with that code).
+  rpc UpdateRate(UpdateRateRequest) returns (UpdateRateResult);
+  // AddRates stores the rate plans of a new hotel.
+  rpc AddRates(AddRatesRequest) returns (AddRatesResult);
 }
 
 message Request {
@@ -35,3 +40,19 @@ message RoomType {
   string currency = 5;
   string roomDescription = 6;
 }
+
+message UpdateRateRequest {
+  string hotelId = 1;
+  string code = 2;
+  double bookableRate = 3;
+  double totalRate = 4;
+  double totalRateInclusive = 5;
+}
+
+message UpdateRateResult {}
+
+message AddRatesRequest {
+  repeated RatePlan ratePlans = 1;
+}
+
+message AddRatesResult {}
