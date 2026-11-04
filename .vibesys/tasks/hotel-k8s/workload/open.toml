@@ -6,8 +6,8 @@ application = "hotel"
 
 [load]
 model = "open_loop"
-rate = 650
-duration_seconds = 20
+rate = 670
+duration_seconds = 40
 warmup_seconds = 10
 concurrency = 512
 timeout_seconds = 10
