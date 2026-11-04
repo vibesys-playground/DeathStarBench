@@ -244,6 +244,15 @@ func generateHotel(r *rng, index, cityIndex int, city *City, taken map[[2]float6
 		}
 	}
 
+	describeHotel(r, &hotel, &template)
+	return hotel
+}
+
+// describeHotel draws everything of a hotel after its location from the
+// template's city: name, phone, address, description, rating, capacity and
+// rate plans.
+func describeHotel(r *rng, hotel *Hotel, template *cityTemplate) {
+	stars := hotel.Stars
 	district := template.districts[r.intn(len(template.districts))]
 	bare := strings.TrimPrefix(district, "the ")
 	prefix := namePrefixes[r.intn(len(namePrefixes))]
@@ -313,7 +322,6 @@ func generateHotel(r *rng, index, cityIndex int, city *City, taken map[[2]float6
 		})
 		hotel.Price = math.Min(hotel.Price, total)
 	}
-	return hotel
 }
 
 func generateUsers(r *rng) []User {
