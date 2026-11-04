@@ -230,7 +230,9 @@ void SocialGraphHandler::Follow(
         mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
       });
 
-  std::future<void> redis_update_future = std::async(std::launch::async, [&]() {
+  // Invalidate the cached sets once MongoDB holds the change (deferred: runs
+  // in get() below, after the MongoDB updates); a later read reloads them.
+  std::future<void> redis_update_future = std::async(std::launch::deferred, [&]() {
     auto redis_span = opentracing::Tracer::Global()->StartSpan(
         "social_graph_redis_update_client",
         {opentracing::ChildOf(&span->context())});
@@ -238,10 +240,8 @@ void SocialGraphHandler::Follow(
     {
       if (_redis_client_pool) {
         auto pipe = _redis_client_pool->pipeline(false);
-        pipe.zadd(std::to_string(user_id) + ":followees",
-                  std::to_string(followee_id), timestamp, UpdateType::NOT_EXIST)
-            .zadd(std::to_string(followee_id) + ":followers",
-                  std::to_string(user_id), timestamp, UpdateType::NOT_EXIST);
+        pipe.del(std::to_string(user_id) + ":followees")
+            .del(std::to_string(followee_id) + ":followers");
         try {
           auto replies = pipe.exec();
         } catch (const Error &err) {
@@ -251,10 +251,8 @@ void SocialGraphHandler::Follow(
       }
       else if (IsRedisReplicationEnabled()) {
           auto pipe = _redis_primary_client_pool->pipeline(false);
-          pipe.zadd(std::to_string(user_id) + ":followees",
-              std::to_string(followee_id), timestamp, UpdateType::NOT_EXIST)
-              .zadd(std::to_string(followee_id) + ":followers",
-                  std::to_string(user_id), timestamp, UpdateType::NOT_EXIST);
+          pipe.del(std::to_string(user_id) + ":followees")
+              .del(std::to_string(followee_id) + ":followers");
           try {
               auto replies = pipe.exec();
           }
@@ -271,12 +269,10 @@ void SocialGraphHandler::Follow(
         //       of Redis++ clients:
         //       https://github.com/sewenew/redis-plus-plus/issues/212
         try {
-          _redis_cluster_client_pool->zadd(
-              std::to_string(user_id) + ":followees",
-              std::to_string(followee_id), timestamp, UpdateType::NOT_EXIST);
-          _redis_cluster_client_pool->zadd(
-              std::to_string(followee_id) + ":followers",
-              std::to_string(user_id), timestamp, UpdateType::NOT_EXIST);
+          _redis_cluster_client_pool->del(
+              std::to_string(user_id) + ":followees");
+          _redis_cluster_client_pool->del(
+              std::to_string(followee_id) + ":followers");
         } catch (const Error &err) {
           LOG(error) << err.what();
           throw err;
@@ -287,9 +283,9 @@ void SocialGraphHandler::Follow(
   });
 
   try {
-    redis_update_future.get();
     mongo_update_follower_future.get();
     mongo_update_followee_future.get();
+    redis_update_future.get();
   } catch (const std::exception &e) {
     LOG(warning) << e.what();
     throw;
@@ -420,7 +416,9 @@ void SocialGraphHandler::Unfollow(
         mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
       });
 
-  std::future<void> redis_update_future = std::async(std::launch::async, [&]() {
+  // Invalidate the cached sets once MongoDB holds the change (deferred: runs
+  // in get() below, after the MongoDB updates); a later read reloads them.
+  std::future<void> redis_update_future = std::async(std::launch::deferred, [&]() {
     auto redis_span = opentracing::Tracer::Global()->StartSpan(
         "social_graph_redis_update_client",
         {opentracing::ChildOf(&span->context())});
@@ -429,8 +427,7 @@ void SocialGraphHandler::Unfollow(
         auto pipe = _redis_client_pool->pipeline(false);
         std::string followee_key = std::to_string(user_id) + ":followees";
         std::string follower_key = std::to_string(followee_id) + ":followers";
-        pipe.zrem(followee_key, std::to_string(followee_id))
-            .zrem(follower_key, std::to_string(user_id));
+        pipe.del(followee_key).del(follower_key);
 
         try {
           auto replies = pipe.exec();
@@ -443,8 +440,7 @@ void SocialGraphHandler::Unfollow(
           auto pipe = _redis_primary_client_pool->pipeline(false);
           std::string followee_key = std::to_string(user_id) + ":followees";
           std::string follower_key = std::to_string(followee_id) + ":followers";
-          pipe.zrem(followee_key, std::to_string(followee_id))
-              .zrem(follower_key, std::to_string(user_id));
+          pipe.del(followee_key).del(follower_key);
 
           try {
               auto replies = pipe.exec();
@@ -458,10 +454,8 @@ void SocialGraphHandler::Unfollow(
         std::string followee_key = std::to_string(user_id) + ":followees";
         std::string follower_key = std::to_string(followee_id) + ":followers";
         try {
-          _redis_cluster_client_pool->zrem(followee_key,
-                                           std::to_string(followee_id));
-          _redis_cluster_client_pool->zrem(follower_key,
-                                           std::to_string(user_id));
+          _redis_cluster_client_pool->del(followee_key);
+          _redis_cluster_client_pool->del(follower_key);
         } catch (const Error &err) {
           LOG(error) << err.what();
           throw err;
@@ -472,9 +466,9 @@ void SocialGraphHandler::Unfollow(
   });
 
   try {
-    redis_update_future.get();
     mongo_update_follower_future.get();
     mongo_update_followee_future.get();
+    redis_update_future.get();
   } catch (...) {
     throw;
   }
