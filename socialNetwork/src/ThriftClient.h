@@ -3,6 +3,8 @@
 
 #include <string>
 #include <thread>
+#include <cerrno>
+#include <sys/socket.h>
 #include <iostream>
 #include <chrono>
 #include <boost/log/trivial.hpp>
@@ -125,6 +127,19 @@ bool ThriftClient<TThriftClient>::IsConnected() {
 
 template<class TThriftClient>
 void ThriftClient<TThriftClient>::Connect() {
+  // A pooled connection whose server went away (for example a restarted
+  // replica behind the Service address) is closed and opened again, so the
+  // next call does not fail on it.
+  if (IsConnected()) {
+    char byte;
+    ssize_t n = recv(_socket->getSocketFD(), &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+    if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) || n > 0) {
+      try {
+        _transport->close();
+      } catch (TException &) {
+      }
+    }
+  }
   if (!IsConnected()) {
     try {
       _transport->open();
