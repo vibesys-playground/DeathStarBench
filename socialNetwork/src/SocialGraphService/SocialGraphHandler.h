@@ -593,7 +593,11 @@ void SocialGraphHandler::GetFollowers(
           "social_graph_redis_insert_client",
           {opentracing::ChildOf(&span->context())});
       try {
-        if (_redis_client_pool) {
+        // An empty set cannot be cached (ZADD needs a member), and a user
+        // may have no followers or followees.
+        if (redis_zset.empty()) {
+        }
+        else if (_redis_client_pool) {
           _redis_client_pool->zadd(key, redis_zset.begin(), redis_zset.end());
         } 
         else if (IsRedisReplicationEnabled()) {
@@ -745,7 +749,11 @@ void SocialGraphHandler::GetFollowees(
           "social_graph_redis_insert_client",
           {opentracing::ChildOf(&span->context())});
       try {
-        if (_redis_client_pool) {
+        // An empty set cannot be cached (ZADD needs a member), and a user
+        // may have no followers or followees.
+        if (redis_zset.empty()) {
+        }
+        else if (_redis_client_pool) {
           _redis_client_pool->zadd(key, redis_zset.begin(), redis_zset.end());
         } 
         else if (IsRedisReplicationEnabled()) {
