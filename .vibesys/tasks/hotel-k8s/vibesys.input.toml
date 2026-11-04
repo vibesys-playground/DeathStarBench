@@ -4,6 +4,9 @@ backends = ["cpu"]
 [agent]
 domain = "microservices"
 
+[environment]
+needs = ["kubernetes"]
+
 # The check and the benchmark are the trusted wrapper run.py. It reads
 # KUBECONFIG, VIBESYS_K8S_REGISTRY and VIBESYS_K8S_BUILDER from the environment.
 [accuracy]
