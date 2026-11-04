@@ -1,0 +1,10 @@
+[[objective]]
+name = "operations_per_second"
+direction = "max"
+
+[[objective]]
+name = "latency_ms.p99"
+direction = "min"
+
+[pareto]
+relative_noise = 0.05
