@@ -364,7 +364,7 @@ spec:
         args:
         - |
           servicebench --mode benchmark --workload /workload/{workload}.toml \\
-            --base-url {url} --seed 48 --fixture-seed 48 --startup-timeout 120 \\
+            --base-url {url} --startup-timeout 120 \\
             --output-json /tmp/summary.json --vs-output /tmp/stream.jsonl
           rc=$?
           echo "::summary::"; cat /tmp/summary.json 2>/dev/null

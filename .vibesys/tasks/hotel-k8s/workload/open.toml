@@ -1,4 +1,6 @@
 version = 1
+# fixture_seed differs from closed.toml: both phases run in one namespace, and the
+# application has no way to delete reservations, so the phases need disjoint dates.
 name = "hotel-k8s-open-loop"
 application = "hotel"
 
@@ -11,7 +13,7 @@ concurrency = 512
 timeout_seconds = 10
 repetitions = 2
 seed = 48
-fixture_seed = 48
+fixture_seed = 49
 min_offered_rate_ratio = 0.95
 
 [[targets]]
