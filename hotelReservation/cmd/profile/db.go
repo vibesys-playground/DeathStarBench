@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/rs/zerolog/log"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -170,15 +171,30 @@ func initializeDatabase(url string) (*mongo.Client, func()) {
 	log.Info().Msg("Successfully connected to MongoDB")
 
 	collection := client.Database("profile-db").Collection("hotels")
-	_, err = collection.InsertMany(context.TODO(), newProfiles)
-	if err != nil {
-		log.Fatal().Msg(err.Error())
+	if hasData(collection) {
+		log.Info().Msgf("Collection %s already holds data; not inserting test data", collection.Name())
+	} else {
+		_, err = collection.InsertMany(context.TODO(), newProfiles)
+		if err != nil {
+			log.Fatal().Msg(err.Error())
+		}
+		log.Info().Msg("Successfully inserted test data into profile DB")
 	}
-	log.Info().Msg("Successfully inserted test data into profile DB")
 
 	return client, func() {
 		if err := client.Disconnect(context.TODO()); err != nil {
 			log.Fatal().Msg(err.Error())
 		}
 	}
+}
+
+// hasData reports whether the collection already holds documents, for example
+// a dataset that the deployment wrote before the service started. The service
+// then leaves the data alone and inserts no test data.
+func hasData(collection *mongo.Collection) bool {
+	count, err := collection.CountDocuments(context.TODO(), bson.D{}, options.Count().SetLimit(1))
+	if err != nil {
+		log.Fatal().Msgf("Failed to count documents in %s: %v", collection.Name(), err)
+	}
+	return count > 0
 }

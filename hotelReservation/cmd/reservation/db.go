@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/rs/zerolog/log"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -66,20 +67,37 @@ func initializeDatabase(url string) (*mongo.Client, func()) {
 	resCollection := database.Collection("reservation")
 	numCollection := database.Collection("number")
 
-	_, err = resCollection.InsertMany(context.TODO(), newReservations)
-	if err != nil {
-		log.Fatal().Msg(err.Error())
-	}
+	// The capacity collection marks a seeded database: a seeded database may
+	// legitimately hold no reservations yet.
+	if hasData(numCollection) {
+		log.Info().Msgf("Collection %s already holds data; not inserting test data", numCollection.Name())
+	} else {
+		_, err = resCollection.InsertMany(context.TODO(), newReservations)
+		if err != nil {
+			log.Fatal().Msg(err.Error())
+		}
 
-	_, err = numCollection.InsertMany(context.TODO(), newNumbers)
-	if err != nil {
-		log.Fatal().Msg(err.Error())
+		_, err = numCollection.InsertMany(context.TODO(), newNumbers)
+		if err != nil {
+			log.Fatal().Msg(err.Error())
+		}
+		log.Info().Msg("Successfully inserted test data into reservation DB")
 	}
-	log.Info().Msg("Successfully inserted test data into reservation DB")
 
 	return client, func() {
 		if err := client.Disconnect(context.TODO()); err != nil {
 			log.Fatal().Msg(err.Error())
 		}
 	}
+}
+
+// hasData reports whether the collection already holds documents, for example
+// a dataset that the deployment wrote before the service started. The service
+// then leaves the data alone and inserts no test data.
+func hasData(collection *mongo.Collection) bool {
+	count, err := collection.CountDocuments(context.TODO(), bson.D{}, options.Count().SetLimit(1))
+	if err != nil {
+		log.Fatal().Msgf("Failed to count documents in %s: %v", collection.Name(), err)
+	}
+	return count > 0
 }

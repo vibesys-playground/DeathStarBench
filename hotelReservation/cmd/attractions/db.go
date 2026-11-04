@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/rs/zerolog/log"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -71,25 +72,37 @@ func initializeDatabase(url string) (*mongo.Client, func()) {
 	log.Info().Msg("Successfully connected to MongoDB")
 
 	collectionH := client.Database("attractions-db").Collection("hotels")
-	_, err = collectionH.InsertMany(context.TODO(), newPoints)
-	if err != nil {
-		log.Fatal().Msg(err.Error())
+	if hasData(collectionH) {
+		log.Info().Msgf("Collection %s already holds data; not inserting test data", collectionH.Name())
+	} else {
+		_, err = collectionH.InsertMany(context.TODO(), newPoints)
+		if err != nil {
+			log.Fatal().Msg(err.Error())
+		}
+		log.Info().Msg("Successfully inserted test data into museum DB")
 	}
-	log.Info().Msg("Successfully inserted test data into museum DB")
 
 	collectionR := client.Database("attractions-db").Collection("restaurants")
-	_, err = collectionR.InsertMany(context.TODO(), newRestaurants)
-	if err != nil {
-		log.Fatal().Msg(err.Error())
+	if hasData(collectionR) {
+		log.Info().Msgf("Collection %s already holds data; not inserting test data", collectionR.Name())
+	} else {
+		_, err = collectionR.InsertMany(context.TODO(), newRestaurants)
+		if err != nil {
+			log.Fatal().Msg(err.Error())
+		}
+		log.Info().Msg("Successfully inserted test data into restaurant DB")
 	}
-	log.Info().Msg("Successfully inserted test data into restaurant DB")
 
 	collectionM := client.Database("attractions-db").Collection("museums")
-	_, err = collectionM.InsertMany(context.TODO(), newMuseums)
-	if err != nil {
-		log.Fatal().Msg(err.Error())
+	if hasData(collectionM) {
+		log.Info().Msgf("Collection %s already holds data; not inserting test data", collectionM.Name())
+	} else {
+		_, err = collectionM.InsertMany(context.TODO(), newMuseums)
+		if err != nil {
+			log.Fatal().Msg(err.Error())
+		}
+		log.Info().Msg("Successfully inserted test data into museum DB")
 	}
-	log.Info().Msg("Successfully inserted test data into museum DB")
 
 	return client, func() {
 		if err := client.Disconnect(context.TODO()); err != nil {
@@ -97,4 +110,15 @@ func initializeDatabase(url string) (*mongo.Client, func()) {
 		}
 	}
 
+}
+
+// hasData reports whether the collection already holds documents, for example
+// a dataset that the deployment wrote before the service started. The service
+// then leaves the data alone and inserts no test data.
+func hasData(collection *mongo.Collection) bool {
+	count, err := collection.CountDocuments(context.TODO(), bson.D{}, options.Count().SetLimit(1))
+	if err != nil {
+		log.Fatal().Msgf("Failed to count documents in %s: %v", collection.Name(), err)
+	}
+	return count > 0
 }
