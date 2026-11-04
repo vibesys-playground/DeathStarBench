@@ -12,3 +12,5 @@ wrk2/*.[oa]
 wrk2/obj/
 
 /.vibesys-state/
+
+__pycache__/
