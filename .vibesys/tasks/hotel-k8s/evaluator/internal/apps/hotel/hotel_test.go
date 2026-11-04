@@ -449,6 +449,9 @@ func validateCanonicalLocation(query map[string]string) error {
 			return nil
 		}
 	}
+	if lat > -59 && lat < -19 && lon > -166 && lon < -84 {
+		return nil // the additions' sandboxes
+	}
 	return fmt.Errorf("location %s,%s is not near any city centre", query["lat"], query["lon"])
 }
 
@@ -681,21 +684,34 @@ func TestAllOperationsAgainstHTTPFake(t *testing.T) {
 	}
 }
 
-// fakeHotel answers from the dataset as the application would.
+// fakeHotel answers from the dataset and its writes as the application
+// would, with writes visible at once.
 type fakeHotel struct {
 	t            *testing.T
 	mu           sync.Mutex
 	reservations map[string]int
+	state        *hotelsupport.State
+	// staleProfiles serves every profile as a cache that is never
+	// invalidated would: as first read.
+	staleProfiles bool
+	writes        []api.HTTPRequestSpec
 }
 
 func newFakeHotel(t *testing.T) http.Handler {
-	fake := &fakeHotel{t: t, reservations: make(map[string]int)}
+	handler, _ := newWritableFake(t)
+	return handler
+}
+
+func newWritableFake(t *testing.T) (http.Handler, *fakeHotel) {
+	fake := &fakeHotel{t: t, reservations: make(map[string]int), state: hotelsupport.NewState(hotelsupport.DefaultReference())}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/hotels", fake.hotels)
 	mux.HandleFunc("/recommendations", fake.recommendations)
 	mux.HandleFunc("/user", fake.user)
 	mux.HandleFunc("/reservation", fake.reservation)
-	return mux
+	mux.HandleFunc("/rates", fake.rates)
+	mux.HandleFunc("/admin/", fake.admin)
+	return mux, fake
 }
 
 func (f *fakeHotel) hotels(writer http.ResponseWriter, request *http.Request) {
@@ -704,12 +720,14 @@ func (f *fakeHotel) hotels(writer http.ResponseWriter, request *http.Request) {
 		http.Error(writer, err.Error(), http.StatusBadRequest)
 		return
 	}
-	ids, _, err := hotelsupport.DefaultReference().SearchCandidates(query["lat"], query["lon"])
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ids, _, err := f.state.SearchCandidates(query["lat"], query["lon"])
 	if err != nil {
 		http.Error(writer, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeFeatures(writer, ids)
+	f.writeFeatures(writer, ids)
 }
 
 func (f *fakeHotel) recommendations(writer http.ResponseWriter, request *http.Request) {
@@ -718,32 +736,112 @@ func (f *fakeHotel) recommendations(writer http.ResponseWriter, request *http.Re
 		http.Error(writer, err.Error(), http.StatusBadRequest)
 		return
 	}
-	reference := hotelsupport.DefaultReference()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	var ids []string
 	switch query["require"] {
 	case "dis":
 		lat, _ := strconv.ParseFloat(query["lat"], 64)
 		lon, _ := strconv.ParseFloat(query["lon"], 64)
-		ids = reference.NearestHotels(lat, lon)
+		ids = f.state.NearestHotels(lat, lon)
 	case "rate":
-		ids = reference.BestRated()
+		ids = f.state.BestRated()
 	case "price":
-		ids = reference.Cheapest()
+		ids = f.state.Cheapest()
 	default:
 		http.Error(writer, "bad require", http.StatusBadRequest)
 		return
 	}
-	writeFeatures(writer, ids)
+	f.writeFeatures(writer, ids)
 }
 
-func writeFeatures(writer http.ResponseWriter, ids []string) {
+func (f *fakeHotel) writeFeatures(writer http.ResponseWriter, ids []string) {
 	ids = append([]string(nil), ids...)
 	sort.Sort(sort.Reverse(sort.StringSlice(ids)))
 	features := make([]map[string]any, 0, len(ids))
 	for _, id := range ids {
-		features = append(features, feature(id))
+		hotel, _ := f.state.Hotel(id)
+		profile, _ := f.state.Profile(id)
+		if f.staleProfiles {
+			profile = hotelsupport.Profile{Name: hotel.Name, Phone: hotel.Phone}
+		}
+		features = append(features, map[string]any{
+			"type": "Feature", "id": hotel.ID,
+			"properties": map[string]any{"name": profile.Name, "phone_number": profile.Phone},
+			"geometry":   map[string]any{"type": "Point", "coordinates": []float32{float32(hotel.Lon), float32(hotel.Lat)}},
+		})
 	}
 	writeJSON(writer, geoJSON(features))
+}
+
+func (f *fakeHotel) rates(writer http.ResponseWriter, request *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id := request.URL.Query().Get("hotelId")
+	plans := []map[string]any{}
+	for _, plan := range f.state.Plans(id) {
+		plans = append(plans, map[string]any{
+			"code": plan.Code, "inDate": plan.InDate, "outDate": plan.OutDate,
+			"roomType": map[string]any{
+				"code": plan.RoomCode, "roomDescription": plan.RoomDescription, "bookableRate": plan.BookableRate,
+				"totalRate": plan.TotalRate, "totalRateInclusive": plan.TotalRateInclusive,
+			},
+		})
+	}
+	writeJSON(writer, map[string]any{"hotelId": id, "ratePlans": plans})
+}
+
+func (f *fakeHotel) admin(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		http.Error(writer, "POST", http.StatusMethodNotAllowed)
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	query := singleQuery(request.URL.Query())
+	f.writes = append(f.writes, api.HTTPRequestSpec{Path: request.URL.Path, Query: query})
+	number := func(key string) float64 {
+		value, err := strconv.ParseFloat(query[key], 64)
+		if err != nil {
+			f.t.Errorf("%s %s=%q", request.URL.Path, key, query[key])
+		}
+		return value
+	}
+	var err error
+	message := ""
+	switch request.URL.Path {
+	case "/admin/rate":
+		err = f.state.SetPrices(query["hotelId"], query["code"], hotelsupport.Prices{
+			Bookable: number("bookableRate"), Total: number("totalRate"), Inclusive: number("totalRateInclusive"),
+		})
+		message = rateUpdated
+	case "/admin/profile":
+		err = f.state.SetProfile(query["hotelId"], query["name"], query["phone"])
+		message = profileUpdated
+	case "/admin/capacity":
+		err = f.state.SetCapacity(query["hotelId"], int(number("rooms")))
+		message = capacityUpdated
+	case "/admin/hotel":
+		var body newHotelBody
+		if decodeErr := json.NewDecoder(request.Body).Decode(&body); decodeErr != nil {
+			http.Error(writer, decodeErr.Error(), http.StatusBadRequest)
+			return
+		}
+		hotel := dataset.Hotel{ID: body.HotelID, Name: body.Name, Phone: body.PhoneNumber, Lat: body.Lat, Lon: body.Lon,
+			Rating: body.Rating, Price: body.Price, Capacity: body.Rooms}
+		for _, plan := range body.RatePlans {
+			hotel.RatePlans = append(hotel.RatePlans, dataset.RatePlan{Code: plan.Code, InDate: plan.InDate, OutDate: plan.OutDate,
+				RoomCode: plan.RoomType.Code, RoomDescription: plan.RoomType.RoomDescription,
+				BookableRate: plan.RoomType.BookableRate, TotalRate: plan.RoomType.TotalRate, TotalRateInclusive: plan.RoomType.TotalRateInclusive})
+		}
+		err = f.state.Add(hotel)
+		message = hotelAdded
+	}
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(writer, map[string]any{"message": message})
 }
 
 func (f *fakeHotel) user(writer http.ResponseWriter, request *http.Request) {
@@ -762,7 +860,13 @@ func (f *fakeHotel) reservation(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	number, numberErr := strconv.Atoi(query.Get("number"))
-	capacity, capacityErr := reference.Capacity(query.Get("hotelId"))
+	f.mu.Lock()
+	capacity, known := f.state.Capacity(query.Get("hotelId"))
+	f.mu.Unlock()
+	var capacityErr error
+	if !known {
+		capacityErr = fmt.Errorf("unknown hotel")
+	}
 	if numberErr != nil || capacityErr != nil || query.Get("inDate") == "" || query.Get("outDate") == "" || query.Get("customerName") == "" {
 		http.Error(writer, "invalid reservation query", http.StatusBadRequest)
 		return
@@ -780,6 +884,7 @@ func (f *fakeHotel) reservation(writer http.ResponseWriter, request *http.Reques
 
 type handlerRuntime struct {
 	handler  http.Handler
+	mu       sync.Mutex
 	requests []api.HTTPRequestSpec
 }
 
@@ -791,7 +896,9 @@ func (r *handlerRuntime) Invoke(_ context.Context, invocation api.Invocation) ap
 	if invocation.Target != hotelsupport.GatewayTarget {
 		return api.ProtocolResult{ErrorCategory: "invalid_target", ErrorMessage: invocation.Target}
 	}
+	r.mu.Lock()
 	r.requests = append(r.requests, request)
+	r.mu.Unlock()
 	requestURL := "http://hotel.test" + request.Path
 	if len(request.Query) != 0 {
 		query := make(url.Values, len(request.Query))
@@ -800,7 +907,10 @@ func (r *handlerRuntime) Invoke(_ context.Context, invocation api.Invocation) ap
 		}
 		requestURL += "?" + query.Encode()
 	}
-	httpRequest := httptest.NewRequest(request.Method, requestURL, nil)
+	httpRequest := httptest.NewRequest(request.Method, requestURL, strings.NewReader(request.Body))
+	for key, value := range request.Headers {
+		httpRequest.Header.Set(key, value)
+	}
 	recorder := httptest.NewRecorder()
 	r.handler.ServeHTTP(recorder, httpRequest)
 	return api.ProtocolResult{
