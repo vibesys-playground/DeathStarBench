@@ -1,31 +1,41 @@
-# Social Network application adapter
+# Social Network benchmark adapter
 
-This package contains the typed adapter for the DeathStarBench Social Network
-scenario. It owns the behavior that cannot be represented as static HTTP
-operations alone.
+Requests over the task's dataset (`internal/dataset`, seeded by `cmd/seed`)
+and exact validation of every answer.
 
-The adapter:
+Operations (workload weights 500/400/100/5/5):
 
-- creates seed-namespaced benchmark users, a ring of follow edges, and posts;
-- selects users and constructs timeline-read and compose/read operation plans;
-- validates exact post schemas, creator identity, ordering, uniqueness, the
-  expected newest content window, stable post/request/timestamp identity across
-  reads, compose acknowledgements, and both user- and home-timeline
-  read-your-write behavior; and
-- captures nginx-to-Thrift timing headers as custom measurements.
+- `user_timeline_read`: the user timeline of a user drawn by Zipf (s = 1)
+  over follower count (profiles of popular users are viewed most).
+- `home_timeline_read`: the home timeline of a user drawn by Zipf (s = 0.75)
+  over post count (active users read and post most).
+- `compose_post`: an active user posts (a few words from a short list, a
+  unique `#m...` marker, a mention of a followee 20% of the time, a URL at
+  the end 15%, media 5%), then reads their own user timeline, which must
+  hold the post (read your write).
+- `follow` / `unfollow`: an active user follows a popular user, or drops a
+  followee, on an edge with no change in flight.
 
-DeathStarBench has no topology-neutral reset API, so the adapter rejects more
-than one repetition per run. Independent trials must use fresh deployments for
-comparable state, while VibeSys optimization evaluations use a random fixture
-seed independent of the deterministic load seed. Numeric IDs use aligned blocks
-from the exactly representable 53-bit integer range, making collisions
-negligible even across long campaigns. A known first-fan-out `ZADD` failure
-is tolerated only during seed fixture creation, matching the legacy setup
-behavior; the same response remains a failure for measured writes.
+Pages are 10 posts: the first 80%, the second 12%, the third 5%, pages 4-7
+3%. Over 100k samples an unbounded cache keyed by the exact request would hit
+66.7% of the timeline requests (user timelines 77%, home timelines 57%; see
+`TestRequestDistribution`).
 
-The `compose_post` operation remains available as a legacy alias, but uses the
-same three-step semantic contract. The checked-in scenario uses
-`compose_user_timeline`; both names schedule, time, and account for compose,
-author timeline read, and follower home timeline read as one logical operation.
-The adapter rejects `--skip-prepare` because prior live writes make an exact
-state oracle impossible to reconstruct safely.
+Validation (`Model`, `internal/timeline`) is exact under the contract in
+`evaluator/INTERFACE.md`: seeded posts must be served with their stored
+content; live posts are matched by marker on first sight, checked against
+what was sent (creator, text with the URL shortened, mentions, media, a
+timestamp within the compose's time) and must keep that identity. A page
+must be `timeline[start:stop]` of some timeline that holds every post that
+must be there, any of the posts that may be there, and nothing else:
+acknowledged posts are required in the author's timeline immediately and in
+followers' and mentioned users' home timelines for reads starting more than
+1 s after the acknowledgement; requests in flight, failed writes and posts
+composed around a follow change are allowed either way. Times are taken
+conservatively (a read starts no earlier than its plan was built, a write
+is acknowledged no later than its validation), so slack only ever favours
+the application.
+
+The model carries over between trials; `--state-out`/`--state-in` of
+`cmd/loadgen` carry it between processes (the journal of writes, about
+10 bytes per write event compressed).
