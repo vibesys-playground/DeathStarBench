@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bradfitz/gomemcache/memcache"
+	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/lease"
 	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/registry"
 	pb "github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/services/reservation/proto"
 	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/tls"
@@ -120,6 +121,9 @@ func (s *Server) MakeReservation(ctx context.Context, req *pb.Request) (*pb.Resu
 		// first check memc
 		memc_key := hotelId + "_" + inDate.String()[0:10] + "_" + outdate
 		item, err := s.MemcClient.Get(memc_key)
+		if err == nil && lease.IsLease(item) {
+			err = memcache.ErrCacheMiss // another request is filling it
+		}
 		if err == nil {
 			// memcached hit
 			count, _ = strconv.Atoi(string(item.Value))
@@ -155,13 +159,18 @@ func (s *Server) MakeReservation(ctx context.Context, req *pb.Request) (*pb.Resu
 		// check memc capacity
 		memc_cap_key := hotelId + "_cap"
 		item, err = s.MemcClient.Get(memc_cap_key)
+		if err == nil && lease.IsLease(item) {
+			err = memcache.ErrCacheMiss // another request is filling it
+		}
 		hotel_cap := 0
 		if err == nil {
 			// memcached hit
 			hotel_cap, _ = strconv.Atoi(string(item.Value))
 			log.Trace().Msgf("memcached hit %s = %d", memc_cap_key, hotel_cap)
 		} else if err == memcache.ErrCacheMiss {
-			// memcached miss
+			// memcached miss; take the fill lease before reading MongoDB, so
+			// a capacity change between the read and the fill cannot be undone
+			fill := lease.Acquire(s.MemcClient, memc_cap_key)
 			var num number
 			err = numCollection.FindOne(context.TODO(), &bson.D{{"hotelId", hotelId}}).Decode(&num)
 			if err != nil {
@@ -170,7 +179,7 @@ func (s *Server) MakeReservation(ctx context.Context, req *pb.Request) (*pb.Resu
 			hotel_cap = int(num.Number)
 
 			// write to memcache
-			s.MemcClient.Set(&memcache.Item{Key: memc_cap_key, Value: []byte(strconv.Itoa(hotel_cap))})
+			fill.Fill([]byte(strconv.Itoa(hotel_cap)))
 		} else {
 			log.Panic().Msgf("Tried to get memc_cap_key [%v], but got memmcached error = %s", memc_cap_key, err)
 		}
@@ -248,7 +257,7 @@ func (s *Server) CheckAvailability(ctx context.Context, req *pb.Request) (*pb.Re
 	cacheCap := make(map[string]int, len(hotelIds))
 	queryMissKeys := []string{}
 	for _, hotelId := range hotelIds {
-		if item, ok := cacheMemRes[hotelId+"_cap"]; ok {
+		if item, ok := cacheMemRes[hotelId+"_cap"]; ok && !lease.IsLease(item) {
 			hotelCap, _ := strconv.Atoi(string(item.Value))
 			cacheCap[hotelId] = hotelCap
 		} else {
@@ -256,6 +265,12 @@ func (s *Server) CheckAvailability(ctx context.Context, req *pb.Request) (*pb.Re
 		}
 	}
 	if len(queryMissKeys) > 0 {
+		// Take the fill leases before reading MongoDB, so a capacity change
+		// between the read and the fill cannot be undone.
+		fills := make(map[string]lease.Lease, len(queryMissKeys))
+		for _, hotelId := range queryMissKeys {
+			fills[hotelId] = lease.Acquire(s.MemcClient, hotelId+"_cap")
+		}
 		numCollection := s.MongoClient.Database("reservation-db").Collection("number")
 		var nums []number
 		capMongoSpan, _ := opentracing.StartSpanFromContext(ctx, "mongodb_capacity_get_multi_number")
@@ -270,8 +285,7 @@ func (s *Server) CheckAvailability(ctx context.Context, req *pb.Request) (*pb.Re
 		}
 		for _, num := range nums {
 			cacheCap[num.HotelId] = num.Number
-			// Add, not Set: never replace a value another request stored meanwhile.
-			go s.MemcClient.Add(&memcache.Item{Key: num.HotelId + "_cap", Value: []byte(strconv.Itoa(num.Number))})
+			go fills[num.HotelId].Fill([]byte(strconv.Itoa(num.Number)))
 		}
 	}
 
@@ -321,7 +335,7 @@ func (s *Server) CheckAvailability(ctx context.Context, req *pb.Request) (*pb.Re
 	}
 	var wg sync.WaitGroup
 	for comm, queryItem := range queryMap {
-		if item, ok := itemsMap[comm]; ok {
+		if item, ok := itemsMap[comm]; ok && !lease.IsLease(item) {
 			count, _ := strconv.Atoi(string(item.Value))
 			check(queryItem["hotelId"], count)
 			continue
@@ -331,6 +345,9 @@ func (s *Server) CheckAvailability(ctx context.Context, req *pb.Request) (*pb.Re
 		go func(comm string, queryItem map[string]string) {
 			defer wg.Done()
 
+			// MakeReservation stores counts with Set, which also ends this
+			// lease, so an older count never replaces a newer one.
+			fill := lease.Acquire(s.MemcClient, comm)
 			var reserve []reservation
 			resCollection := s.MongoClient.Database("reservation-db").Collection("reservation")
 			filter := bson.D{{"hotelId", queryItem["hotelId"]}, {"inDate", queryItem["startDate"]}, {"outDate", queryItem["endDate"]}}
@@ -350,8 +367,7 @@ func (s *Server) CheckAvailability(ctx context.Context, req *pb.Request) (*pb.Re
 			for _, r := range reserve {
 				count += r.Number
 			}
-			// Add, not Set: a reservation may have stored a newer count meanwhile.
-			go s.MemcClient.Add(&memcache.Item{Key: comm, Value: []byte(strconv.Itoa(count))})
+			go fill.Fill([]byte(strconv.Itoa(count)))
 			check(queryItem["hotelId"], count)
 		}(comm, queryItem)
 	}

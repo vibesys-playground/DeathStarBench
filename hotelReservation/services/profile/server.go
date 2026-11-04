@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bradfitz/gomemcache/memcache"
+	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/lease"
 	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/registry"
 	pb "github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/services/profile/proto"
 	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/tls"
@@ -116,6 +117,9 @@ func (s *Server) GetProfiles(ctx context.Context, req *pb.Request) (*pb.Result, 
 		log.Panic().Msgf("Tried to get hotelIds [%v], but got memmcached error = %s", hotelIds, err)
 	} else {
 		for hotelId, item := range resMap {
+			if lease.IsLease(item) {
+				continue // another request is filling it: a miss
+			}
 			profileStr := string(item.Value)
 			log.Trace().Msgf("memc hit with %v", profileStr)
 
@@ -128,7 +132,12 @@ func (s *Server) GetProfiles(ctx context.Context, req *pb.Request) (*pb.Result, 
 		wg.Add(len(profileMap))
 		for hotelId := range profileMap {
 			go func(hotelId string) {
+				defer wg.Done()
 				var hotelProf *pb.Hotel
+
+				// Take the fill lease before reading MongoDB, so a profile
+				// update between the read and the fill cannot be undone.
+				fill := lease.Acquire(s.MemcClient, hotelId)
 
 				collection := s.MongoClient.Database("profile-db").Collection("hotels")
 
@@ -138,7 +147,8 @@ func (s *Server) GetProfiles(ctx context.Context, req *pb.Request) (*pb.Result, 
 				mongoSpan.Finish()
 
 				if err != nil {
-					log.Error().Msgf("Failed get hotels data: ", err)
+					log.Error().Msgf("Failed get hotels data: %v", err)
+					return
 				}
 
 				mutex.Lock()
@@ -147,13 +157,12 @@ func (s *Server) GetProfiles(ctx context.Context, req *pb.Request) (*pb.Result, 
 
 				profJson, err := json.Marshal(hotelProf)
 				if err != nil {
-					log.Error().Msgf("Failed to marshal hotel [id: %v] with err:", hotelProf.Id, err)
+					log.Error().Msgf("Failed to marshal hotel [id: %v] with err: %v", hotelProf.Id, err)
+					return
 				}
-				memcStr := string(profJson)
 
 				// write to memcached
-				go s.MemcClient.Set(&memcache.Item{Key: hotelId, Value: []byte(memcStr)})
-				defer wg.Done()
+				go fill.Fill(profJson)
 			}(hotelId)
 		}
 	}

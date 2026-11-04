@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bradfitz/gomemcache/memcache"
+	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/lease"
 	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/registry"
 	pb "github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/services/rate/proto"
 	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/tls"
@@ -114,6 +115,9 @@ func (s *Server) GetRates(ctx context.Context, req *pb.Request) (*pb.Result, err
 		log.Panic().Msgf("Memmcached error while trying to get hotel [id: %v]= %s", hotelIds, err)
 	} else {
 		for hotelId, item := range resMap {
+			if lease.IsLease(item) {
+				continue // another request is filling it: a miss
+			}
 			rateStrs := strings.Split(string(item.Value), "\n")
 			log.Trace().Msgf("memc hit, hotelId = %s,rate strings: %v", hotelId, rateStrs)
 
@@ -131,45 +135,40 @@ func (s *Server) GetRates(ctx context.Context, req *pb.Request) (*pb.Result, err
 		wg.Add(len(rateMap))
 		for hotelId := range rateMap {
 			go func(id string) {
+				defer wg.Done()
 				log.Trace().Msgf("memc miss, hotelId = %s", id)
-				log.Trace().Msg("memcached miss, set up mongo connection")
+
+				// Take the fill lease before reading MongoDB, so a rate
+				// update between the read and the fill cannot be undone.
+				fill := lease.Acquire(s.MemcClient, id)
 
 				mongoSpan, _ := opentracing.StartSpanFromContext(ctx, "mongo_rate")
 				mongoSpan.SetTag("span.kind", "client")
 
 				// memcached miss, set up mongo connection
 				collection := s.MongoClient.Database("rate-db").Collection("inventory")
-				curr, err := collection.Find(context.TODO(), bson.D{{Key: "hotelId", Value: id}})
-				if err != nil {
-					log.Error().Msgf("Failed get rate data: ", err)
-				}
-
 				tmpRatePlans := make(RatePlans, 0)
-				curr.All(context.TODO(), &tmpRatePlans)
-				if err != nil {
-					log.Error().Msgf("Failed get rate data: ", err)
+				curr, err := collection.Find(context.TODO(), bson.D{{Key: "hotelId", Value: id}})
+				if err == nil {
+					err = curr.All(context.TODO(), &tmpRatePlans)
 				}
-
 				mongoSpan.Finish()
+				if err != nil {
+					log.Panic().Msgf("Tried to find hotelId [%v], but got error %v", id, err)
+				}
 
 				memcStr := ""
-				if err != nil {
-					log.Panic().Msgf("Tried to find hotelId [%v], but got error", id, err.Error())
-				} else {
-					for _, r := range tmpRatePlans {
-						mutex.Lock()
-						ratePlans = append(ratePlans, r)
-						mutex.Unlock()
-						rateJson, err := json.Marshal(r)
-						if err != nil {
-							log.Error().Msgf("Failed to marshal plan [Code: %v] with error: %s", r.Code, err)
-						}
-						memcStr = memcStr + string(rateJson) + "\n"
+				for _, r := range tmpRatePlans {
+					mutex.Lock()
+					ratePlans = append(ratePlans, r)
+					mutex.Unlock()
+					rateJson, err := json.Marshal(r)
+					if err != nil {
+						log.Error().Msgf("Failed to marshal plan [Code: %v] with error: %s", r.Code, err)
 					}
+					memcStr = memcStr + string(rateJson) + "\n"
 				}
-				go s.MemcClient.Set(&memcache.Item{Key: id, Value: []byte(memcStr)})
-
-				defer wg.Done()
+				go fill.Fill([]byte(memcStr))
 			}(hotelId)
 		}
 	}
