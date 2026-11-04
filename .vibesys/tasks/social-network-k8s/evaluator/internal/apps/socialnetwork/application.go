@@ -16,6 +16,7 @@ import (
 
 	"vibesys/microservice-evaluator/api"
 	"vibesys/social-network-k8s-evaluator/internal/dataset"
+	"vibesys/social-network-k8s-evaluator/internal/timeline"
 )
 
 const (
@@ -166,4 +167,37 @@ func integer(value any) (int64, bool) {
 		return number, err == nil
 	}
 	return 0, false
+}
+
+var _ api.PreflightApplication = (*Application)(nil)
+
+// ReadinessProbes waits (--startup-timeout) until nginx serves a timeline
+// read of a user outside the dataset, which touches no dataset state.
+func (a *Application) ReadinessProbes() []api.ReadinessProbe {
+	return []api.ReadinessProbe{probe("gateway-ready")}
+}
+
+// PreflightProbes repeats the readiness read once.
+func (a *Application) PreflightProbes() []api.ReadinessProbe {
+	return []api.ReadinessProbe{probe("gateway-preflight")}
+}
+
+func probe(name string) api.ReadinessProbe {
+	return api.ReadinessProbe{
+		Name: name,
+		Invocation: api.Invocation{Target: gateway, Operation: name, Payload: api.HTTPRequestSpec{
+			Method: "GET", Path: "/wrk2-api/user-timeline/read",
+			Query: map[string]string{"user_id": "2999999999", "start": "0", "stop": "1"},
+		}},
+		Validate: func(result api.ProtocolResult) error {
+			body, failure := okBody(result)
+			if failure != nil {
+				return fmt.Errorf("%s", failure.ErrorMessage)
+			}
+			if _, err := timeline.Parse(body); err != nil {
+				return err
+			}
+			return nil
+		},
+	}
 }

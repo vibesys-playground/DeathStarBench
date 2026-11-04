@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"vibesys/social-network-k8s-evaluator/internal/dataset"
 )
 
 // Post is one post as nginx serves it (wrk2-api read routes).
@@ -249,4 +251,24 @@ func Window(candidates []Candidate, page []Post, matched []int, start, stop int,
 		return fmt.Errorf("page [%d, %d) starts too old: at most %d posts can precede %s", start, stop, maybeBefore, Describe(&page[0]))
 	}
 	return nil
+}
+
+// Seeded is a dataset post as the API serves it.
+func Seeded(data *dataset.Dataset, index int32) Post {
+	post := &data.Posts[index]
+	author := &data.Users[post.Author]
+	wire := Post{
+		PostID: strconv.FormatInt(post.ID, 10), CreatorID: strconv.FormatInt(author.ID, 10), Creator: author.Username,
+		ReqID: strconv.FormatInt(post.ReqID, 10), Text: post.Text, Timestamp: post.Timestamp,
+	}
+	for _, v := range post.Mentions {
+		wire.Mentions = append(wire.Mentions, Mention{UserID: strconv.FormatInt(data.Users[v].ID, 10), Username: data.Users[v].Username})
+	}
+	for _, item := range post.Media {
+		wire.Media = append(wire.Media, Media{ID: strconv.FormatInt(item.ID, 10), Type: item.Type})
+	}
+	for _, url := range post.URLs {
+		wire.URLs = append(wire.URLs, URL{Shortened: url.Shortened, Expanded: url.Expanded})
+	}
+	return wire
 }

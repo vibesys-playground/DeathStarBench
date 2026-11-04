@@ -88,23 +88,3 @@ func markerOf(text string) string {
 	}
 	return text[at+1 : end]
 }
-
-// seededWire is a seeded post as the API serves it.
-func seededWire(data *dataset.Dataset, index int32) timeline.Post {
-	post := &data.Posts[index]
-	author := &data.Users[post.Author]
-	wire := timeline.Post{
-		PostID: strconv.FormatInt(post.ID, 10), CreatorID: strconv.FormatInt(author.ID, 10), Creator: author.Username,
-		ReqID: strconv.FormatInt(post.ReqID, 10), Text: post.Text, Timestamp: post.Timestamp,
-	}
-	for _, v := range post.Mentions {
-		wire.Mentions = append(wire.Mentions, timeline.Mention{UserID: strconv.FormatInt(data.Users[v].ID, 10), Username: data.Users[v].Username})
-	}
-	for _, item := range post.Media {
-		wire.Media = append(wire.Media, timeline.Media{ID: strconv.FormatInt(item.ID, 10), Type: item.Type})
-	}
-	for _, url := range post.URLs {
-		wire.URLs = append(wire.URLs, timeline.URL{Shortened: url.Shortened, Expanded: url.Expanded})
-	}
-	return wire
-}
