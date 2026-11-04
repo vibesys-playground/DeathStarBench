@@ -7,4 +7,4 @@ name = "latency_ms.p99"
 direction = "min"
 
 [pareto]
-relative_noise = 0.05
+relative_noise = 0.10
