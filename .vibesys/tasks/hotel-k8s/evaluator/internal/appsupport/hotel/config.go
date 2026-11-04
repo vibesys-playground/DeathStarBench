@@ -1,5 +1,6 @@
-// Package hotel owns topology, seed-input, and preflight contracts shared by
-// the independent Hotel benchmark and accuracy adapters.
+// Package hotel owns topology, seeded-data, and preflight contracts shared by
+// the independent Hotel benchmark and accuracy adapters. Reference answers the
+// read paths of the pinned application over the task's generated dataset.
 package hotel
 
 import (

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	hotelsupport "vibesys/hotel-k8s-evaluator/internal/appsupport/hotel"
+	"vibesys/hotel-k8s-evaluator/internal/dataset"
 	"vibesys/microservice-evaluator/api"
 )
 
@@ -41,6 +42,13 @@ type Application struct {
 	config Config
 	seed   int64
 
+	// reference computes expected answers from the task's dataset; the Zipf
+	// samplers draw cities, users and hotels within a city by rank.
+	reference  *hotelsupport.Reference
+	cities     *dataset.Zipf
+	users      *dataset.Zipf
+	cityHotels []*dataset.Zipf
+
 	// A reservation plan holds this lock until FinishOperation. The service's
 	// capacity check and write are not transactional, so concurrent fill plans
 	// could both observe spare capacity and make the rejection oracle ambiguous.
@@ -49,11 +57,29 @@ type Application struct {
 
 type fixture struct {
 	dateBase        time.Time
-	hotelOffset     uint64
 	nextReservation atomic.Uint64
+
+	// night and used (guarded by Application.reservationMu) are the current
+	// reservation night and the hotels already reserved on it.
+	night uint64
+	used  map[int]struct{}
 }
 
-const reservationDateBlockDays = 4096
+func (f *fixture) isUsed(hotel int) bool {
+	_, used := f.used[hotel]
+	return used
+}
+
+const (
+	// Each trial owns a block of reservationBlockDays nights in the far
+	// future, and books up to reservationsPerNight distinct hotels per night.
+	reservationBlockDays = 512
+	reservationsPerNight = 128
+	reservationSlots     = reservationBlockDays * reservationsPerNight
+	// reservationCycles 400-year Gregorian cycles from 3000-01-01 hold the
+	// blocks (years 3000 through 9799, still four-digit dates).
+	reservationCycles = 17
+)
 
 var _ api.Application = (*Application)(nil)
 var _ api.PreflightApplication = (*Application)(nil)
@@ -74,7 +100,16 @@ func New(workload api.Workload) (api.Application, error) {
 			return nil, fmt.Errorf("Hotel operation %q must not declare operations.http", operation.Name)
 		}
 	}
-	return &Application{config: config, seed: workload.Load.Seed}, nil
+	reference := hotelsupport.DefaultReference()
+	application := &Application{
+		config: config, seed: workload.Load.Seed, reference: reference,
+		cities: dataset.NewZipf(len(reference.Data.Cities), dataset.ZipfOne),
+		users:  dataset.NewZipf(len(reference.Data.Users), dataset.ZipfThreeQuarters),
+	}
+	for _, city := range reference.Data.Cities {
+		application.cityHotels = append(application.cityHotels, dataset.NewZipf(len(city.Hotels), dataset.ZipfThreeQuarters))
+	}
+	return application, nil
 }
 
 func (a *Application) Name() string { return "hotel" }
@@ -88,20 +123,19 @@ func (a *Application) PreflightProbes() []api.ReadinessProbe {
 }
 
 func (a *Application) Prepare(_ context.Context, _ api.Runtime, trial api.TrialContext) (any, error) {
-	// Reserve only future dates, both to avoid the seeded 2015 reservation and
-	// to namespace separate optimization trials without setup-only traffic. A
-	// digest selects an aligned block between years 3000 and 7000; alignment
-	// prevents partially overlapping namespaces.
-	digest := sha256.Sum256([]byte(fmt.Sprintf("%d/%d", trial.FixtureSeed, trial.Index)))
+	// Reserve only far-future nights, outside the rate window that searches
+	// use, and give every trial its own block of them without setup-only
+	// traffic. The fixture seed's digest places the run's first block; trials
+	// of one run take consecutive blocks, so they never share a night, and
+	// runs with different fixture seeds (the phases of one job) collide only
+	// if their digests land within a few blocks of each other (about 1 in
+	// 1000 for two phases of 2 and 3 trials).
+	digest := sha256.Sum256([]byte(fmt.Sprintf("hotel-reservations/%d", trial.FixtureSeed)))
 	rangeStart := time.Date(3000, time.January, 1, 12, 0, 0, 0, time.UTC)
-	// Ten complete Gregorian 400-year cycles avoid time.Duration's roughly
-	// 290-year range limit while retaining exact calendar arithmetic.
-	const availableDays = 10 * 146097
-	blocks := uint64(availableDays / reservationDateBlockDays)
-	block := binary.BigEndian.Uint64(digest[:8]) % blocks
+	const blocks = reservationCycles * 146097 / reservationBlockDays
+	block := (binary.BigEndian.Uint64(digest[:8]) + uint64(trial.Index)) % blocks
 	return &fixture{
-		dateBase:    rangeStart.AddDate(0, 0, int(block)*reservationDateBlockDays),
-		hotelOffset: binary.BigEndian.Uint64(digest[8:16]) % 80,
+		dateBase: rangeStart.AddDate(0, 0, int(block)*reservationBlockDays),
 	}, nil
 }
 

@@ -4,23 +4,29 @@ import (
 	"reflect"
 	"testing"
 
+	"vibesys/hotel-k8s-evaluator/internal/dataset"
 	"vibesys/microservice-evaluator/api"
 )
 
-func TestSeedInputs(t *testing.T) {
-	username, password, err := User(12)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if username != "Cornell_3132" || password != "12121212121212121212" {
-		t.Fatalf("seed user = (%q, %q)", username, password)
-	}
-	capacities := map[int]int{1: 200, 7: 300, 8: 250, 9: 200, 80: 250}
-	for id, want := range capacities {
-		got, err := Capacity(id)
-		if err != nil || got != want {
-			t.Fatalf("Capacity(%d) = %d, %v; want %d", id, got, err, want)
+func TestSeedInputsComeFromTheDataset(t *testing.T) {
+	data := dataset.Default()
+	for _, index := range []int{0, 12, len(data.Users) - 1, len(data.Users)} {
+		username, password := User(index)
+		want := data.Users[index%len(data.Users)]
+		if username != want.Username || password != want.Password {
+			t.Fatalf("User(%d) = (%q, %q), want %+v", index, username, password, want)
 		}
+		if !DefaultReference().ValidLogin(username, password) || DefaultReference().ValidLogin(username, password+"x") {
+			t.Fatalf("ValidLogin disagrees for user %d", index)
+		}
+	}
+	for _, hotel := range []dataset.Hotel{data.Hotels[0], data.Hotels[len(data.Hotels)-1]} {
+		if got, err := Capacity(hotel.ID); err != nil || got != hotel.Capacity {
+			t.Fatalf("Capacity(%s) = %d, %v; want %d", hotel.ID, got, err, hotel.Capacity)
+		}
+	}
+	if _, err := Capacity("0"); err == nil {
+		t.Fatal("Capacity accepted an unknown hotel")
 	}
 }
 

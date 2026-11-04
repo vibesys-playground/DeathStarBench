@@ -31,7 +31,7 @@ func (a *Application) verifyDurableState(
 	start func(context.Context) error,
 	checkAvailability bool,
 ) (int, error) {
-	username, password := hotelsupport.MustUser(0)
+	username, password := hotelsupport.User(0)
 	rateIDs := sortedRateBackedIDs()
 	random.Shuffle(len(rateIDs), func(left, right int) {
 		rateIDs[left], rateIDs[right] = rateIDs[right], rateIDs[left]

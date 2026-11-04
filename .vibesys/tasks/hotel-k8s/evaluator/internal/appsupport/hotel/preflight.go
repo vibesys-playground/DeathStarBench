@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"strconv"
+	"time"
 
+	"vibesys/hotel-k8s-evaluator/internal/dataset"
 	"vibesys/microservice-evaluator/accuracy/httpcheck"
 	"vibesys/microservice-evaluator/api"
 	"vibesys/microservice-evaluator/wire/httpjson"
@@ -13,7 +16,7 @@ import (
 const loginSuccess = "Login successfully!"
 
 func loginRequest(index int) api.HTTPRequestSpec {
-	username, password := MustUser(index)
+	username, password := User(index)
 	request := httpjson.MustRequest(http.MethodGet, "/user", nil, "")
 	request.Query = map[string]string{"username": username, "password": password}
 	return request
@@ -57,7 +60,12 @@ func readinessRequest(path string, query map[string]string) api.HTTPRequestSpec 
 // workload through the frontend rather than accepting the static root page.
 func ReadinessProbes(seed int64) []api.ReadinessProbe {
 	random := rand.New(rand.NewSource(seed ^ 0x68f07e1))
-	index := random.Intn(501)
+	index := random.Intn(UserCount())
+	city := dataset.Default().Cities[0]
+	lat := strconv.FormatFloat(city.Lat, 'f', 4, 64)
+	lon := strconv.FormatFloat(city.Lon, 'f', 4, 64)
+	night := dataset.RateWindowStart.Format(time.DateOnly)
+	nextDay := dataset.RateWindowStart.AddDate(0, 0, 1).Format(time.DateOnly)
 	probe := func(name string, request api.HTTPRequestSpec, validate func(api.ProtocolResult) error) api.ReadinessProbe {
 		return api.ReadinessProbe{
 			Name: name,
@@ -70,11 +78,10 @@ func ReadinessProbes(seed int64) []api.ReadinessProbe {
 	return []api.ReadinessProbe{
 		probe("readiness-user-service", loginRequest(index), validateLogin),
 		probe("readiness-search-services", readinessRequest("/hotels", map[string]string{
-			"inDate": "2015-04-09", "outDate": "2015-04-10",
-			"lat": "37.7867", "lon": "-122.4112",
+			"inDate": night, "outDate": nextDay, "lat": lat, "lon": lon,
 		}), statusOK),
 		probe("readiness-recommendation-service", readinessRequest("/recommendations", map[string]string{
-			"require": "price", "lat": "37.7867", "lon": "-122.4112",
+			"require": "price", "lat": lat, "lon": lon,
 		}), statusOK),
 	}
 }

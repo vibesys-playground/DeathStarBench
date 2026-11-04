@@ -2,27 +2,57 @@ package hotel
 
 import (
 	"fmt"
-	"math"
 	"net/http"
 	"strconv"
 	"time"
 
-	hotelsupport "vibesys/hotel-k8s-evaluator/internal/appsupport/hotel"
+	"vibesys/hotel-k8s-evaluator/internal/dataset"
 	"vibesys/microservice-evaluator/api"
 )
 
+// Request distributions. Every draw of a sample is a function of
+// sample.Random (dataset.Unit with a distinct stream per draw), so a run is
+// replayable from its seed. Reservation slots additionally depend on the
+// order in which plans are built, as the fixture's ordinal does.
+//
+//   - Locations (search and recommendations): a city by Zipf rank (exponent
+//     1, the dataset's popularity order), then a point around its centre with
+//     normal offsets of the city's hotel spread, written with 5 decimals
+//     (about 1 m).
+//   - Stays: a night count from stayNights (1-7, skewed short) and an arrival
+//     uniform over the rate window such that the stay ends inside it.
+//   - Logins: a user by Zipf rank (exponent 0.75) over the user list.
+//   - Reservations: a hotel by popularity, a city by Zipf rank then a hotel
+//     by Zipf rank (exponent 0.75) within the city, on a trial-owned future
+//     night; a user as for logins.
 const (
-	searchArrivalFirstDay  = 9
-	searchArrivalLastDay   = 23
-	searchDepartureLastDay = 24
-	latitudeChoices        = 482
-	longitudeChoices       = 326
+	coordinateDecimals = 5
+	// searchAttempts bounds redraws of a location where the geo service's own
+	// ranking ties (its answer is then not determined).
+	searchAttempts = 8
+	// reservationAttempts bounds popularity draws of a hotel not yet used on
+	// the current night, before falling back to the city's next hotels.
+	reservationAttempts = 16
 )
 
-var expectedRecommendationIDs = map[string][]string{
-	operationRecommendRate:  {"9", "24", "39", "54", "69"},
-	operationRecommendPrice: {"2"},
-}
+// stayNights[n] is the relative weight of a stay of n+1 nights.
+var stayNights = []int{30, 24, 16, 11, 8, 6, 5}
+
+// Mix stream numbers. Each draw uses its own streams; a redraw shifts them by
+// attempt*streamStride.
+const (
+	streamCity        = 1
+	streamLatitude    = 2 // 4 streams
+	streamLongitude   = 6 // 4 streams
+	streamNights      = 10
+	streamArrival     = 11
+	streamLocale      = 12
+	streamUser        = 20
+	streamReserveUser = 21
+	streamHotelCity   = 30
+	streamHotelRank   = 31
+	streamStride      = 64
+)
 
 func (a *Application) BuildOperation(
 	operation api.Operation,
@@ -35,20 +65,16 @@ func (a *Application) BuildOperation(
 	}
 	switch operation.Name {
 	case operationSearch:
-		return oneRequestPlan(operation, searchRequest(sample.Random), rateBackedHotelIDs()), nil
-	case operationRecommendDistance, operationRecommendRate, operationRecommendPrice:
-		request, lat, lon := recommendationRequest(operation.Name, sample.Random)
-		expectedIDs := expectedRecommendationIDs[operation.Name]
-		if operation.Name == operationRecommendDistance {
-			expectedIDs = nearestRecommendationIDs(lat, lon)
+		request, expectedIDs, err := a.searchRequest(sample.Random)
+		if err != nil {
+			return api.OperationPlan{}, err
 		}
-		return oneRequestPlan(
-			operation,
-			request,
-			expectedIDs,
-		), nil
+		return oneRequestPlan(operation, request, expectedIDs), nil
+	case operationRecommendDistance, operationRecommendRate, operationRecommendPrice:
+		request, expectedIDs := a.recommendationRequest(operation.Name, sample.Random)
+		return oneRequestPlan(operation, request, expectedIDs), nil
 	case operationLoginValid, operationLoginInvalid:
-		return a.loginPlan(operation, sample)
+		return a.loginPlan(operation, sample), nil
 	case operationReserveCapacity:
 		return a.reservationPlan(operation, sample, data)
 	default:
@@ -71,83 +97,71 @@ func oneRequestPlan(
 	}
 }
 
-func searchRequest(random uint64) api.HTTPRequestSpec {
-	inDay := searchArrivalFirstDay + fuzzChoice(random, 0, searchArrivalLastDay-searchArrivalFirstDay+1)
-	outDay := inDay + 1 + fuzzChoice(random, 1, searchDepartureLastDay-inDay)
-	lat, lon := canonicalSearchLocation(random)
-	query := map[string]string{
-		"inDate":  fmt.Sprintf("2015-04-%02d", inDay),
-		"outDate": fmt.Sprintf("2015-04-%02d", outDay),
-		"lat":     formatCoordinate(lat), "lon": formatCoordinate(lon),
-	}
-	if fuzzChoice(random, 5, 2) == 1 {
-		query["locale"] = "en"
-	}
-	return api.HTTPRequestSpec{
-		Method: http.MethodGet,
-		Path:   "/hotels",
-		Query:  query,
-	}
+// location draws a point near a city centre and formats it for the wire.
+func (a *Application) location(random uint64, offset uint64) (lat, lon string) {
+	city := &a.reference.Data.Cities[a.cities.Rank(dataset.Unit(random, offset+streamCity))]
+	dy := city.SpreadKm * dataset.Normal(random, offset+streamLatitude)
+	dx := city.SpreadKm * dataset.Normal(random, offset+streamLongitude)
+	return formatCoordinate(city.Lat + dy/111.32), formatCoordinate(city.Lon + dx/city.KmPerDegreeLon)
 }
 
-func recommendationRequest(operation string, random uint64) (api.HTTPRequestSpec, float64, float64) {
+// stay draws the arrival and departure dates of a stay in the rate window.
+func stay(random uint64) (inDate, outDate string) {
+	nights := 1 + pick(stayNights, dataset.Unit(random, streamNights))
+	arrivals := dataset.RateWindowDays - nights + 1
+	arrival := int(dataset.Unit(random, streamArrival) * float64(arrivals))
+	start := dataset.RateWindowStart.AddDate(0, 0, arrival)
+	return start.Format(time.DateOnly), start.AddDate(0, 0, nights).Format(time.DateOnly)
+}
+
+func (a *Application) searchRequest(random uint64) (api.HTTPRequestSpec, []string, error) {
+	inDate, outDate := stay(random)
+	for attempt := uint64(0); attempt < searchAttempts; attempt++ {
+		lat, lon := a.location(random, attempt*streamStride)
+		// No canonical reservation falls in the rate window, so every hotel
+		// is available and search answers geo's nearest rate-backed hotels.
+		expected, exact, err := a.reference.SearchCandidates(lat, lon)
+		if err != nil {
+			return api.HTTPRequestSpec{}, nil, err
+		}
+		if !exact {
+			continue
+		}
+		query := map[string]string{"inDate": inDate, "outDate": outDate, "lat": lat, "lon": lon}
+		if dataset.Unit(random, streamLocale) < 0.5 {
+			query["locale"] = "en"
+		}
+		return api.HTTPRequestSpec{Method: http.MethodGet, Path: "/hotels", Query: query}, expected, nil
+	}
+	return api.HTTPRequestSpec{}, nil, fmt.Errorf("no unambiguous search location for sample %#x", random)
+}
+
+func (a *Application) recommendationRequest(operation string, random uint64) (api.HTTPRequestSpec, []string) {
 	require := map[string]string{
 		operationRecommendDistance: "dis",
 		operationRecommendRate:     "rate",
 		operationRecommendPrice:    "price",
 	}[operation]
-	lat, lon := canonicalRecommendationLocation(random)
-	latText, lonText := formatCoordinate(lat), formatCoordinate(lon)
-	// Calculate the oracle from the values the frontend will parse, not from
-	// pre-format floating-point intermediates that are not sent on the wire.
-	lat = mustParseCoordinate(latText)
-	lon = mustParseCoordinate(lonText)
-	query := map[string]string{
-		"lat": latText, "lon": lonText, "require": require,
-	}
-	if fuzzChoice(random, 4, 2) == 1 {
+	lat, lon := a.location(random, 0)
+	query := map[string]string{"lat": lat, "lon": lon, "require": require}
+	if dataset.Unit(random, streamLocale) < 0.5 {
 		query["locale"] = "en"
 	}
-	return api.HTTPRequestSpec{
-		Method: http.MethodGet,
-		Path:   "/recommendations",
-		Query:  query,
-	}, lat, lon
-}
-
-func canonicalSearchLocation(random uint64) (float64, float64) {
-	// Anchoring the search around a seeded hotel guarantees a geo hit while the
-	// jitter prevents candidates from recognizing a small list of exact inputs.
-	// IDs 20 through 60 keep the entire jitter window inside the official wrk2
-	// coordinate rectangle.
-	anchorID := 20 + fuzzChoice(random, 2, 41)
-	anchor, err := profileForID(strconv.Itoa(anchorID))
-	if err != nil {
-		panic(err)
+	var expected []string
+	switch operation {
+	case operationRecommendDistance:
+		// From the values the frontend parses, not from pre-format floats.
+		expected = a.reference.NearestHotels(mustParseCoordinate(lat), mustParseCoordinate(lon))
+	case operationRecommendRate:
+		expected = a.reference.BestRated()
+	default:
+		expected = a.reference.Cheapest()
 	}
-	latJitter := float64(fuzzChoice(random, 3, 21)-10) / 10000
-	lonJitter := float64(fuzzChoice(random, 4, 21)-10) / 10000
-	return anchor.recommendLat + latJitter, anchor.recommendLon + lonJitter
-}
-
-func canonicalRecommendationLocation(random uint64) (float64, float64) {
-	latitudeStep := fuzzChoice(random, 2, latitudeChoices)
-	longitudeStep := fuzzChoice(random, 3, longitudeChoices)
-	lat := 38.0235 + (float64(latitudeStep)-240.5)/1000.0
-	lon := -122.095 + (float64(longitudeStep)-157.0)/1000.0
-	return lat, lon
-}
-
-func fuzzChoice(random, stream uint64, choices int) int {
-	value := random + 0x9e3779b97f4a7c15*(stream+1)
-	value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9
-	value = (value ^ (value >> 27)) * 0x94d049bb133111eb
-	value ^= value >> 31
-	return int(value % uint64(choices))
+	return api.HTTPRequestSpec{Method: http.MethodGet, Path: "/recommendations", Query: query}, expected
 }
 
 func formatCoordinate(value float64) string {
-	return strconv.FormatFloat(value, 'f', 4, 64)
+	return strconv.FormatFloat(value, 'f', coordinateDecimals, 64)
 }
 
 func mustParseCoordinate(value string) float64 {
@@ -158,42 +172,28 @@ func mustParseCoordinate(value string) float64 {
 	return parsed
 }
 
-func nearestRecommendationIDs(lat, lon float64) []string {
-	minimum := math.MaxFloat64
-	ids := make([]string, 0, 1)
-	for number := 1; number <= 80; number++ {
-		item, err := profileForID(strconv.Itoa(number))
-		if err != nil {
-			panic(err)
-		}
-		distance := recommendationDistance(lat, lon, item.recommendLat, item.recommendLon)
-		switch {
-		case distance < minimum:
-			minimum = distance
-			ids = append(ids[:0], item.id)
-		case distance == minimum:
-			ids = append(ids, item.id)
-		}
+// pick maps u in [0, 1) to an index with probability proportional to weights.
+func pick(weights []int, u float64) int {
+	total := 0
+	for _, weight := range weights {
+		total += weight
 	}
-	return ids
+	draw := int(u * float64(total))
+	for index, weight := range weights {
+		if draw < weight {
+			return index
+		}
+		draw -= weight
+	}
+	return len(weights) - 1
 }
 
-func recommendationDistance(lat1, lon1, lat2, lon2 float64) float64 {
-	toRadians := func(value float64) float64 { return value * math.Pi / 180 }
-	dLat := toRadians(lat2 - lat1)
-	dLon := toRadians(lon2 - lon1)
-	sinLat := math.Sin(dLat / 2)
-	sinLon := math.Sin(dLon / 2)
-	a := math.Pow(sinLat, 2) + math.Pow(sinLon, 2)*math.Cos(toRadians(lat1))*math.Cos(toRadians(lat2))
-	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-	return 6371.0 * c / 1000.0
+func (a *Application) user(random uint64, stream uint64) (string, string) {
+	return a.reference.User(a.users.Rank(dataset.Unit(random, stream)))
 }
 
-func (a *Application) loginPlan(operation api.Operation, sample api.Sample) (api.OperationPlan, error) {
-	username, password, err := hotelsupport.User(int(sample.Random % 501))
-	if err != nil {
-		return api.OperationPlan{}, err
-	}
+func (a *Application) loginPlan(operation api.Operation, sample api.Sample) api.OperationPlan {
+	username, password := a.user(sample.Random, streamUser)
 	if operation.Name == operationLoginInvalid {
 		password += "-invalid"
 	}
@@ -201,7 +201,15 @@ func (a *Application) loginPlan(operation api.Operation, sample api.Sample) (api
 		Method: http.MethodGet,
 		Path:   "/user",
 		Query:  map[string]string{"username": username, "password": password},
-	}, nil), nil
+	}, nil)
+}
+
+// popularHotel draws a hotel index by popularity: a city by Zipf rank, then a
+// hotel by Zipf rank within it.
+func (a *Application) popularHotel(random uint64, attempt uint64) (city, rank int) {
+	city = a.cities.Rank(dataset.Unit(random, attempt*streamStride+streamHotelCity))
+	rank = a.cityHotels[city].Rank(dataset.Unit(random, attempt*streamStride+streamHotelRank))
+	return city, rank
 }
 
 func (a *Application) reservationPlan(
@@ -216,36 +224,47 @@ func (a *Application) reservationPlan(
 	release := func() { a.reservationMu.Unlock() }
 
 	// Sample.Counter restarts between warmup and measurement. The fixture-owned
-	// ordinal persists across both phases. Pair each date with every hotel before
-	// advancing to the next date, expanding the collision-free namespace without
-	// consuming additional calendar range.
+	// ordinal persists across both phases. reservationsPerNight consecutive
+	// ordinals share a night of the trial's block, each on a different hotel,
+	// so every reservation finds its hotel's full capacity free.
 	ordinal := data.nextReservation.Add(1) - 1
-	const reservationSlots = reservationDateBlockDays * 80
 	if ordinal >= reservationSlots {
 		release()
 		return api.OperationPlan{}, fmt.Errorf(
-			"Hotel trial exceeded its %d unique hotel/date reservation slots",
-			reservationSlots,
+			"Hotel trial exceeded its %d unique hotel/night reservation slots", reservationSlots,
 		)
 	}
-	// The fixture-derived rotation changes the hotel-to-ordinal mapping between
-	// independent trials even in the unlikely event that date blocks collide.
-	hotelID := 1 + int((ordinal+data.hotelOffset)%80)
-	capacity, err := hotelsupport.Capacity(hotelID)
-	if err != nil {
-		release()
-		return api.OperationPlan{}, err
+	night := ordinal / reservationsPerNight
+	if data.used == nil || data.night != night {
+		data.night, data.used = night, make(map[int]struct{}, reservationsPerNight)
 	}
-	username, password, err := hotelsupport.User(int((sample.Random >> 9) % 501))
-	if err != nil {
-		release()
-		return api.OperationPlan{}, err
+	hotelIndex := -1
+	for attempt := uint64(0); attempt < reservationAttempts && hotelIndex < 0; attempt++ {
+		city, rank := a.popularHotel(sample.Random, attempt)
+		if candidate := a.reference.Data.Cities[city].Hotels[rank]; !data.isUsed(candidate) {
+			hotelIndex = candidate
+		}
 	}
-	inDate := data.dateBase.AddDate(0, 0, int(ordinal/80))
+	if hotelIndex < 0 {
+		// The popular hotels of this night are taken: the drawn city's next
+		// hotels in popularity order (a night holds fewer reservations than
+		// any city has hotels).
+		city, rank := a.popularHotel(sample.Random, 0)
+		hotels := a.reference.Data.Cities[city].Hotels
+		for offset := 1; offset <= len(hotels) && hotelIndex < 0; offset++ {
+			if candidate := hotels[(rank+offset)%len(hotels)]; !data.isUsed(candidate) {
+				hotelIndex = candidate
+			}
+		}
+	}
+	data.used[hotelIndex] = struct{}{}
+	hotel := &a.reference.Data.Hotels[hotelIndex]
+	username, password := a.user(sample.Random, streamReserveUser)
+	inDate := data.dateBase.AddDate(0, 0, int(night))
 	outDate := inDate.AddDate(0, 0, 1)
 	baseQuery := map[string]string{
 		"inDate": inDate.Format(time.DateOnly), "outDate": outDate.Format(time.DateOnly),
-		"hotelId":      strconv.Itoa(hotelID),
+		"hotelId":      hotel.ID,
 		"customerName": fmt.Sprintf("vibesys-%016x-%d", sample.Random, sample.Counter),
 		"username":     username, "password": password,
 	}
@@ -259,7 +278,7 @@ func (a *Application) reservationPlan(
 	}
 	return api.OperationPlan{
 		Invocations: []api.Invocation{
-			{Target: operation.Target, Operation: operation.Name, Payload: request(capacity)},
+			{Target: operation.Target, Operation: operation.Name, Payload: request(hotel.Capacity)},
 			{Target: operation.Target, Operation: operation.Name, Payload: request(1)},
 		},
 		State: &operationState{kind: operation.Name, release: release},

@@ -95,26 +95,21 @@ func generateSequentialProgram(
 			"Hotel differential cases must be positive, got %d", cases,
 		)
 	}
-	if len(catalog) != 80 {
-		return accuracy.Program[differentialAction]{}, fmt.Errorf(
-			"Hotel differential catalog has %d profiles, expected 80", len(catalog),
-		)
+	if len(catalog) == 0 {
+		return accuracy.Program[differentialAction]{}, fmt.Errorf("Hotel differential catalog is empty")
 	}
 	random := rand.New(rand.NewSource(seed ^ 0x4d6f64656c))
 	history := make([]differentialAction, 0, 5+cases*9)
+	randomHotel := func() profile { return catalog[strconv.Itoa(1+random.Intn(len(catalog)))] }
 
-	userIndex := random.Intn(501)
-	username, password, err := hotelsupport.User(userIndex)
-	if err != nil {
-		return accuracy.Program[differentialAction]{}, err
-	}
+	username, password := hotelsupport.User(random.Intn(hotelsupport.UserCount()))
 	history = append(history,
 		differentialAction{Kind: actionLogin, Query: credentials(username, password)},
 		differentialAction{Kind: actionLogin, Query: credentials(username, password+"-wrong")},
-		differentialAction{Kind: actionRecommend, Query: recommendationQuery("price", catalog["2"], false)},
-		differentialAction{Kind: actionRecommend, Query: recommendationQuery("rate", catalog["9"], true)},
+		differentialAction{Kind: actionRecommend, Query: recommendationQuery("price", randomHotel(), false)},
+		differentialAction{Kind: actionRecommend, Query: recommendationQuery("rate", randomHotel(), true)},
 	)
-	distanceID := strconv.Itoa(1 + random.Intn(80))
+	distanceID := randomHotel().id
 	history = append(history, differentialAction{
 		Kind:  actionRecommend,
 		Query: recommendationQuery("dis", catalog[distanceID], random.Intn(2) == 0),
@@ -143,10 +138,7 @@ func generateSequentialProgram(
 		}
 		firstRooms := 1 + random.Intn(capacity-1)
 		secondRooms := capacity - firstRooms
-		validUser, validPassword, err := hotelsupport.User(random.Intn(501))
-		if err != nil {
-			return accuracy.Program[differentialAction]{}, err
-		}
+		validUser, validPassword := hotelsupport.User(random.Intn(hotelsupport.UserCount()))
 
 		history = append(history,
 			differentialAction{Kind: actionSearch, Query: searchQuery(primaryDates, catalog[primary], caseIndex%2 == 0)},
