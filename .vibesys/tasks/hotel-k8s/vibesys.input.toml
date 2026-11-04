@@ -1,0 +1,19 @@
+version = 1
+backends = ["cpu"]
+
+[agent]
+domain = "microservices"
+
+[environment]
+needs = ["kubernetes"]
+
+# The check and the benchmark are the trusted wrapper run.py. It reads
+# KUBECONFIG, VIBESYS_K8S_REGISTRY and VIBESYS_K8S_BUILDER from the environment.
+[accuracy]
+command = ["python3", ".vibesys/tasks/hotel-k8s/run.py", "check", "--project-root", "${PROJECT_ROOT}"]
+timeout_seconds = 1200
+
+[benchmark]
+command = ["python3", ".vibesys/tasks/hotel-k8s/run.py", "benchmark", "--project-root", "${PROJECT_ROOT}"]
+timeout_seconds = 1800
+result_protocol = 2

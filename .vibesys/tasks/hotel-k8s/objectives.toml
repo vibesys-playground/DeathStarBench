@@ -1,0 +1,12 @@
+[[objective]]
+name = "operations_per_second"
+direction = "max"
+relative_noise = 0.05   # measured spread 1.6-3.7% across base runs
+
+[[objective]]
+name = "latency_ms.p99"
+direction = "min"
+relative_noise = 0.10   # measured spread 7.7% with 3 x 60 s open-loop trials
+
+[pareto]
+relative_noise = 0.10
