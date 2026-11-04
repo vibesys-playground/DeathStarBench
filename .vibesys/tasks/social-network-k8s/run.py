@@ -51,8 +51,7 @@ from pathlib import Path
 TASK = "social-network-k8s"
 TASK_DIR = Path(__file__).resolve().parent
 MANIFEST = TASK_DIR / "k8s" / "manifest.yaml"
-# BRING-UP: the temporary workloads until the evaluator's workload/ lands.
-WORKLOADS = TASK_DIR / "bringup"
+WORKLOADS = TASK_DIR / "workload"
 # Namespaces are hk8s-sn-<hex>. The label keys are this task's own: hotel-k8s sweeps
 # namespaces labelled vibesys.dev/hotel-k8s, this task only those labelled with its key.
 NAMESPACE_PREFIX = "hk8s-sn-"
@@ -95,7 +94,7 @@ READY_TIMEOUT_SECONDS = 300.0
 OPEN_LOOP_LOAD_FRACTION = 0.7
 # The open phase replays the closed phase's writes (--state-out / --state-in), so it
 # can validate timelines exactly on the same deployment.
-STATE_JOURNAL = False  # BRING-UP: servicebench's bundled adapter has no journal
+STATE_JOURNAL = True
 
 
 class JobError(Exception):
