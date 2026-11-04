@@ -44,7 +44,7 @@ The task owns everything else, and a candidate cannot change it:
   nginx-thrift, each at **2 replicas** behind a ClusterIP Service; 5 MongoDB, 3 Redis,
   3 memcached and jaeger; replica counts, resources, commands, and the tracing
   configuration (`jaeger-config.yml` / `jaeger-config.json`, sampling ratio 0.01);
-- the dataset and how it is written (through the public API, before the load starts);
+- the dataset, written into the data tier before your services start (see Data), and its indexes;
 - the load generator, the workloads, the open loop's offered rate, and the checker.
 
 Resources are fixed. Every application pod gets exactly 1 CPU (request = limit) and a
@@ -75,26 +75,48 @@ deployment is ready when every Deployment is Available (services: TCP 9090; ngin
 `GET /` = 200) and user- and home-timeline reads answer 200 through nginx-thrift.
 A candidate that does not become ready in 300 seconds fails.
 
+## Data
+
+Before the application starts, the task writes its dataset directly into the data tier, as
+the services themselves would have written it: 20,000 users, 293,926 follow edges (Zipf
+popularity, heavy-tailed follower counts up to about 3,800), 91,490 posts (heavy-tailed per
+user, up to 400, over 180 days, with mentions and URLs), their user timelines, 1.3 million
+home-timeline entries in `home-timeline-redis`, and the social graph also in
+`social-graph-redis`. The other caches (memcached, `user-timeline-redis`) start empty. The
+databases have indexes on the keys the services look documents up by (`user.username`,
+`user.user_id`, `social-graph.user_id`, `post.post_id`, `user-timeline.user_id`,
+`url-shorten.shortened_url`), as a production database would; a service must not drop or
+rewrite the data (it may add indexes of its own).
+
 ## Correctness bar
 
 The check deploys the candidate, seeds the dataset and runs the task's checker over the
-public API only. The contract:
+public API only; it restarts single pods and flushes caches while it checks. With
+"acknowledged" meaning the request returned HTTP 200 and the bound B = 1 s:
 
-- Every response has the schema and values of the pinned application (timeline order
-  newest first, `start`/`stop` windows, post fields, user mentions, shortened URLs, media).
-- An acknowledged post is in its author's user timeline immediately (the next read).
-- It is in the home timeline of each follower (and of each mentioned user) within
-  **1 second**.
-- A follow or unfollow is reflected in the home timelines of posts composed after it
-  within 1 second.
-- This holds on every replica: any instance may serve any request.
-- Data survives a restart of any stateless pod and a flush of a cache tier (memcached,
-  `social-graph-redis`, `user-timeline-redis`): acknowledged posts, follows and users
-  live in MongoDB (home timelines in `home-timeline-redis`, which is a store and is
-  never flushed). The checker restarts single pods and flushes caches during the check.
+1. Exact data. Every post served has the stored content: post id, creator, request id,
+   timestamp, text (URLs replaced by their shortened form), user mentions, media, URLs;
+   timelines are ordered newest first by timestamp, without duplicates; `start`/`stop`
+   select that window.
+2. User timeline: a compose acknowledged before a read of the author's user timeline
+   starts is in it (read your write, no delay).
+3. Home timeline: a post is in the home timeline of each follower of its author (and of
+   each user it mentions) for every read that starts more than B after the compose was
+   acknowledged; it is never in the home timeline of a user who neither follows the
+   author nor is mentioned. (The pinned application fans out synchronously; the bound
+   permits asynchronous designs.)
+4. Follow/unfollow: a follow (unfollow) acknowledged more than B before a compose is sent
+   makes that post appear in (stay out of) the follower's home timeline as in 3. Posts
+   composed before the change may or may not appear in that follower's home timeline
+   afterwards.
+5. Every replica: 2-4 hold whichever instance serves the read.
+6. Durability: acknowledged data survives a restart of any stateless pod and a flush of
+   any cache tier (memcached, `social-graph-redis`, `user-timeline-redis`).
+   `home-timeline-redis` is a store, not a cache, and is never flushed.
 
-The load generator checks the responses of the benchmark the same way, and a wrong
-answer fails the measurement.
+Requests in flight, or acknowledged less than B before the read, may or may not be
+visible. Timestamp ties may be served in either order. The load generator validates the
+benchmark's responses against the same model, and a wrong answer fails the measurement.
 
 ## Rules
 

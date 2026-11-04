@@ -63,8 +63,9 @@ so the services' shared libraries are copied next to OpenResty's without conflic
 The C++ stage copies only `CMakeLists.txt`, `cmake/`, `third_party/`, `gen-cpp/` and `src/`, so a
 change to the Lua scripts or nginx.conf leaves it cached, and it compiles through ccache in a
 BuildKit cache mount (`id=social-network-ccache`), which the builder keeps between jobs.
-Measured on the cluster's builder: cold build (empty cache) 77 s; unchanged tree 0 s (the
-image tag is the tree hash and the layers are cached).
+Measured on the cluster's builder: cold build (empty cache) 77 s; one C++ source changed
+18-26 s; a Lua or nginx.conf change under 1 s; unchanged tree 0 s (the image tag is the
+tree hash and the layers are cached).
 
 ## Topology and resources
 
@@ -98,6 +99,19 @@ Changes to `socialNetwork/` that are part of the base every candidate starts fro
   the Lua scripts (which already append it to service names) and includes `resolver.conf`
   (Docker's `127.0.0.11` by default, mounted by the Compose files; rewritten by
   `nginx-thrift.sh` in the image).
+
+- `SocialGraphHandler.h`: GetFollowers/GetFollowees no longer fail for a user with none (an
+  empty set was ZADDed into Redis; composing a post by a user nobody follows returned 500).
+- `SocialGraphHandler.h`: Follow/Unfollow delete the cached `<id>:followers`/`<id>:followees`
+  sets once MongoDB holds the change, instead of ZADD/ZREM into a set that may not be loaded
+  (after a flush one follow left a one-member set that GetFollowers trusted as complete).
+- `machine_id.h`: unique-id and user services derive their 3-hex-digit machine id from the
+  low 11 bits of the pod's IPv4 address instead of a 12-bit hash of the MAC address, so the
+  two replicas cannot generate the same post or user id.
+
+The seed Job writes the dataset (evaluator `cmd/seed`; social-graph, post and url-shorten
+indexes included); run.py then creates the indexes on `user.username`, `user.user_id` and
+`user-timeline.user_id` (`INDEXES` in run.py).
 
 ## Environment contract
 
