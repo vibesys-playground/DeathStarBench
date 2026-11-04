@@ -29,9 +29,14 @@ is a candidate input: the CLI versions these files as the task.
    `benchmark`: builds a load-generator image (busybox + `servicebench` + `workload/`) and runs two
    Kubernetes Jobs inside the namespace against `http://frontend:5000`: `closed` (operations per
    second) then `open` (p99 latency at the declared rate). One protocol-2 result carries both.
-5. Deletes the namespace on every exit path, including SIGTERM, SIGINT and SIGHUP. A job that
-   was SIGKILLed leaks its namespace; the next job deletes namespaces labelled
-   `vibesys.dev/hotel-k8s` that are older than 6 hours.
+5. Deletes the namespace on every exit path the process can see: normal end, error, SIGTERM,
+   SIGINT and SIGHUP. The CLI ends a cancelled or timed-out job with SIGKILL (host: the process
+   group; docker: `docker rm --force`), which no handler can see, so the namespace leaks. Each
+   namespace therefore carries labels `vibesys.dev/hotel-k8s=1`, `vibesys.dev/hotel-k8s-created=<epoch>`
+   and `vibesys.dev/hotel-k8s-job=<job id>`, and every job first deletes the task's `hk8s-*`
+   namespaces older than the larger of the manifest's `accuracy` and `benchmark` `timeout_seconds`
+   plus 10 minutes: older than any live job can be, so concurrent jobs are never touched.
+   `run.py sweep` runs only that sweep.
 
 ## Environment contract
 

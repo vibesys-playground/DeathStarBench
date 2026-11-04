@@ -3,13 +3,15 @@
 
     run.py check     --project-root ROOT
     run.py benchmark --project-root ROOT --vs-output PATH     (result protocol 2)
+    run.py sweep                                              (delete stale namespaces only)
     run.py ctl       --namespace NS --port PORT start|stop    (used by the oracle)
 
 Every job builds the candidate image from ROOT/hotelReservation with buildctl,
 pushes it to the registry, deploys the task-owned manifests into a fresh
 namespace of the cluster, waits for readiness, runs the oracle or the load
 generator, and deletes the namespace on every exit path (normal, error, SIGTERM,
-SIGINT, SIGHUP). Only SIGKILL leaks a namespace; the next job sweeps stale ones.
+SIGINT, SIGHUP). Only SIGKILL (which is what the CLI sends on cancel and timeout) leaks a namespace;
+the next job sweeps stale ones (see sweep_stale_namespaces).
 
 Environment (set by the vibesys-cli `kubernetes` resource, or by hand):
     KUBECONFIG              kubeconfig of the cluster (required)
@@ -34,6 +36,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import tomllib
 import threading
 import time
 import urllib.error
@@ -44,7 +47,9 @@ TASK_DIR = Path(__file__).resolve().parent
 MANIFEST = TASK_DIR / "k8s" / "manifest.yaml"
 WORKLOADS = TASK_DIR / "workload"
 NAMESPACE_LABEL = "vibesys.dev/hotel-k8s"
-STALE_NAMESPACE_SECONDS = 6 * 3600
+CREATED_LABEL = "vibesys.dev/hotel-k8s-created"  # epoch seconds
+JOB_LABEL = "vibesys.dev/hotel-k8s-job"
+SWEEP_MARGIN_SECONDS = 600
 
 def tool(name: str) -> str:
     """Prebuilt binary: in the job image they are on PATH under /opt/vibesys/bin."""
@@ -195,7 +200,9 @@ class Deployment:
         self.created = True  # even a half-created namespace must be deleted
         self.kube.kubectl("create", "namespace", self.name, namespaced=False)
         self.kube.kubectl(
-            "label", "namespace", self.name, f"{NAMESPACE_LABEL}=1", namespaced=False
+            "label", "namespace", self.name, f"{NAMESPACE_LABEL}=1",
+            f"{CREATED_LABEL}={int(time.time())}", f"{JOB_LABEL}={job_label()}",
+            namespaced=False,
         )
         manifest = MANIFEST.read_text()
         manifest = manifest.replace("${NAMESPACE}", self.name).replace("${HOTEL_IMAGE}", hotel_image)
@@ -271,21 +278,52 @@ def wait_frontend_ready(port: int, timeout: float) -> None:
         raise JobError(f"frontend not ready after {timeout:.0f}s ({last})")
 
 
-def sweep_stale_namespaces() -> None:
-    """Delete this task's namespaces that a killed job left behind."""
+def job_label() -> str:
+    """The CLI job id, from $VIBESYS_ARTIFACTS_DIR (.../<task>/<job>/<step>); else a random token."""
+    artifacts = os.environ.get("VIBESYS_ARTIFACTS_DIR", "")
+    name = Path(artifacts).parent.name if artifacts else ""
+    return name if name and all(c.isalnum() or c in "-_." for c in name) else secrets.token_hex(4)
+
+
+def job_timeout_seconds() -> int:
+    """The longest a job of this task may run, from the manifest's own timeouts."""
+    manifest = tomllib.loads((TASK_DIR / "vibesys.input.toml").read_text())
+    return max(int(manifest[section]["timeout_seconds"]) for section in ("accuracy", "benchmark"))
+
+
+def sweep_stale_namespaces(now: float | None = None, ttl: float | None = None) -> list[str]:
+    """Delete this task's namespaces that a killed job left behind.
+
+    The CLI ends a cancelled or timed-out job with SIGKILL, so no cleanup runs. A namespace
+    is stale when its creation label is older than the longest a job may run plus a margin,
+    which no live job can reach, so a concurrent job's namespace is never touched.
+    """
+    ttl = job_timeout_seconds() + SWEEP_MARGIN_SECONDS if ttl is None else ttl
+    now = time.time() if now is None else now
     result = Kube().kubectl(
         "get", "namespace", "-l", NAMESPACE_LABEL, "-o", "json", namespaced=False, check=False
     )
     if result.returncode != 0:
-        return
-    now = time.time()
+        return []
+    swept = []
     for item in json.loads(result.stdout).get("items", []):
-        created = item["metadata"]["creationTimestamp"]
-        age = now - calendar.timegm(time.strptime(created, "%Y-%m-%dT%H:%M:%SZ"))
-        if age > STALE_NAMESPACE_SECONDS:
-            name = item["metadata"]["name"]
-            log(f"sweeping stale namespace {name}")
+        meta = item["metadata"]
+        name = meta["name"]
+        if not name.startswith("hk8s-"):
+            continue
+        created = meta.get("labels", {}).get(CREATED_LABEL)
+        if created is not None and created.isdigit():
+            age = now - int(created)
+        else:  # a namespace from before the label existed
+            age = now - calendar.timegm(
+                time.strptime(meta["creationTimestamp"], "%Y-%m-%dT%H:%M:%SZ")
+            )
+        if age > ttl:
+            log(f"sweeping stale namespace {name} (job {meta['labels'].get(JOB_LABEL, '?')}, "
+                f"{age:.0f}s old, limit {ttl:.0f}s)")
             Kube().kubectl("delete", "namespace", name, "--wait=false", namespaced=False, check=False)
+            swept.append(name)
+    return swept
 
 
 # ---- crash control used by the oracle (--run-command-json / --stop-command-json) ----
@@ -471,6 +509,7 @@ def main(argv: list[str]) -> int:
         p.add_argument("--project-root", type=Path, required=True)
         if name == "benchmark":
             p.add_argument("--vs-output", type=Path, required=True)
+    sub.add_parser("sweep")
     p = sub.add_parser("ctl")
     p.add_argument("--namespace", required=True)
     p.add_argument("--port", type=int, required=True)
@@ -492,6 +531,9 @@ def main(argv: list[str]) -> int:
     atexit.register(shutil.rmtree, scratch, ignore_errors=True)
     try:
         require_env("KUBECONFIG")
+        if args.command == "sweep":
+            sweep_stale_namespaces()
+            return 0
         if args.command == "ctl":
             return ctl(args.namespace, args.port, args.action)
         require_env("VIBESYS_K8S_REGISTRY")
