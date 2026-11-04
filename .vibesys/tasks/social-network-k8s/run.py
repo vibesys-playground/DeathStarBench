@@ -821,7 +821,13 @@ def do_check(project_root: Path, scratch: Path) -> int:
     artifacts = artifacts_dir()
     deployment, _ = prepare(project_root, scratch, artifacts)
     if not shutil.which("checker"):
-        log("BRING-UP: no checker binary in the job image; the deployment is ready, nothing to check")
+        log("BRING-UP: no checker binary in the job image; exercising the restart hook instead")
+        hook = json.loads(restart_command_json(deployment.name, deployment.port))
+        for action in (["restart", "nginx-thrift"], ["restart", "home-timeline-service"],
+                       ["flush", "user-memcached"], ["flush", "user-timeline-redis"]):
+            started = time.monotonic()
+            run(hook + action, timeout=600, capture=False)
+            log(f"BRING-UP: hook {' '.join(action)} took {time.monotonic() - started:.1f}s")
         deployment.save_pods(artifacts, "pods.txt")
         return 0
     log("running the checker")
