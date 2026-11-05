@@ -22,7 +22,7 @@ REPO_ROOT = TASK_DIR.parent.parent.parent
 
 
 def dump(docs: list[dict]) -> str:
-    return yaml.safe_dump_all(docs, sort_keys=False)
+    return yaml.dump_all(docs, Dumper=getattr(yaml, "CSafeDumper", yaml.SafeDumper), sort_keys=False)
 
 
 def validate(docs: list[dict]) -> envelope.App:

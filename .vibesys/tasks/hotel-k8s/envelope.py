@@ -26,6 +26,7 @@ The rules (OBJECTIVE.md, Resources):
 
 from __future__ import annotations
 
+import functools
 import math
 import re
 from dataclasses import dataclass
@@ -85,6 +86,7 @@ SERVICE_PORT_KEYS = {"name", "port", "targetPort", "protocol"}
 CONFIGMAP_KEYS = {"apiVersion", "kind", "metadata", "data", "binaryData", "immutable"}
 
 DNS_LABEL = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)  # libyaml when the wheel has it
 _OBJECT_PATH = re.compile(r"^((?:Deployment|Service|ConfigMap) [^ .]+)\.(.*)$")
 _VARIABLE = re.compile(r"\$\{([^}]*)\}")
 _QUANTITY = re.compile(r"^([0-9]+(?:\.[0-9]*)?|\.[0-9]+)(m|k|M|G|T|P|E|Ki|Mi|Gi|Ti|Pi|Ei)?$")
@@ -185,7 +187,7 @@ def _selects(selector: dict[str, str], labels: dict[str, str]) -> bool:
 
 def _documents(text: str, source: str) -> list[Any]:
     try:
-        return [doc for doc in yaml.safe_load_all(text) if doc is not None]
+        return [doc for doc in yaml.load_all(text, Loader=_LOADER) if doc is not None]
     except yaml.YAMLError as error:
         raise EnvelopeError(source, [f"not YAML: {error}"]) from None
 
@@ -200,6 +202,7 @@ class TaskObjects:
     configmaps: frozenset[str]
 
 
+@functools.lru_cache(maxsize=4)
 def task_objects(text: str) -> TaskObjects:
     documents = _documents(text, "k8s/manifest.yaml")
     names, selectors, pods, configmaps = set(), {}, [], set()
