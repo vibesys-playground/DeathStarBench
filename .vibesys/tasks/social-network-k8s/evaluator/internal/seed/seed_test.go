@@ -83,8 +83,17 @@ func TestWriteSeedsEmptyDataTierOnce(t *testing.T) {
 	if got := len(posts.collections["post.post"]); got != len(data.Posts) {
 		t.Fatalf("posts written %d, want %d", got, len(data.Posts))
 	}
-	if !posts.indexes["post.post/post_id"] {
-		t.Fatal("post_id index missing")
+	for target, index := range map[string]string{
+		"post-storage-mongodb": "post.post/post_id", "user-mongodb": "user.user/username",
+		"social-graph-mongodb": "social-graph.social-graph/user_id", "url-shorten-mongodb": "url-shorten.url-shorten/shortened_url",
+		"user-timeline-mongodb": "user-timeline.user-timeline/user_id",
+	} {
+		if !mongos[target].(*fakeMongo).indexes[index] {
+			t.Fatalf("index %s missing", index)
+		}
+	}
+	if !mongos["user-mongodb"].(*fakeMongo).indexes["user.user/user_id"] {
+		t.Fatal("index user.user/user_id missing")
 	}
 	home := servers["home-timeline-redis"]
 	for u := range data.Users {

@@ -1,5 +1,6 @@
 // Command checker is the task's accuracy check of a Social Network
-// deployment (see evaluator/INTERFACE.md):
+// deployment: the oracle's check programs (internal/oracle), run against the
+// public API and judged by the oracle's model (see evaluator/INTERFACE.md):
 //
 //	checker --base-url URL --seed N|random --restart-command-json '["...", ...]'
 //	        [--deployments a,b] [--caches a,b] [--dataset-seed N] [--skip-dataset]
@@ -22,8 +23,8 @@ import (
 	"strings"
 	"time"
 
-	"vibesys/social-network-k8s-evaluator/internal/checker"
 	"vibesys/social-network-k8s-evaluator/internal/dataset"
+	"vibesys/social-network-k8s-evaluator/internal/oracle"
 )
 
 type commandHook struct{ argv []string }
@@ -51,8 +52,8 @@ func run(args []string) int {
 	baseURL := flags.String("base-url", "", "nginx-thrift URL")
 	seedText := flags.String("seed", "random", "seed (integer or random)")
 	hookJSON := flags.String("restart-command-json", "", "restart hook argv as a JSON array")
-	deployments := flags.String("deployments", strings.Join(checker.DefaultDeployments, ","), "deployments to restart one pod of")
-	caches := flags.String("caches", strings.Join(checker.DefaultCaches, ","), "caches to flush")
+	deployments := flags.String("deployments", strings.Join(oracle.DefaultDeployments, ","), "deployments to restart one pod of")
+	caches := flags.String("caches", strings.Join(oracle.DefaultCaches, ","), "caches to flush")
 	datasetSeed := flags.String("dataset-seed", strconv.FormatUint(dataset.DefaultSeed, 10), "seeded dataset")
 	skipDataset := flags.Bool("skip-dataset", false, "do not check the seeded dataset (deployment already written to)")
 	freshness := flags.Int("freshness-ms", 1000, "freshness bound of home timelines")
@@ -81,7 +82,7 @@ func run(args []string) int {
 			return fail("--seed: %v", err)
 		}
 	}
-	config := checker.Config{
+	config := oracle.Config{
 		BaseURL: *baseURL, Seed: seed, Bound: time.Duration(*freshness) * time.Millisecond, Replicas: *replicaReads,
 		Deployments: split(*deployments), Caches: split(*caches), FollowAfterFlush: !*skipFollowAfterFlush,
 		Log: func(format string, values ...any) {
@@ -106,7 +107,7 @@ func run(args []string) int {
 		}
 	}
 	started := time.Now()
-	results, err := checker.Run(context.Background(), config)
+	results, err := oracle.RunChecks(context.Background(), config)
 	if err != nil {
 		return fail("%v", err)
 	}

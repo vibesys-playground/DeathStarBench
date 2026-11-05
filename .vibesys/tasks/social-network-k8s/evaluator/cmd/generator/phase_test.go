@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -38,27 +39,38 @@ var (
 	loadgenErr  error
 )
 
-// loadgen builds the SDK's loadgen (the same module and commit as the generator's SDK).
+// loadgen is $LOADGEN, or the SDK's loadgen built from the module the generator's SDK comes
+// from (the same commit), in that module's own directory.
 func loadgen(t *testing.T) string {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("builds and runs loadgen")
 	}
+	if path := os.Getenv("LOADGEN"); path != "" {
+		return path
+	}
 	loadgenOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "sn-loadgen-")
+		const module = "github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen"
+		dir, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", module).Output()
+		if err != nil {
+			loadgenErr = fmt.Errorf("go list -m %s: %w", module, err)
+			return
+		}
+		out, err := os.MkdirTemp("", "sn-loadgen-")
 		if err != nil {
 			loadgenErr = err
 			return
 		}
-		loadgenPath = filepath.Join(dir, "loadgen")
-		out, err := exec.Command("go", "build", "-o", loadgenPath, "github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen/cmd/loadgen").CombinedOutput()
-		if err != nil {
-			loadgenErr = err
-			loadgenPath = string(out)
+		loadgenPath = filepath.Join(out, "loadgen")
+		build := exec.Command("go", "build", "-buildvcs=false", "-o", loadgenPath, "./cmd/loadgen")
+		build.Dir = strings.TrimSpace(string(dir))
+		build.Env = append(os.Environ(), "GOWORK=off")
+		if output, err := build.CombinedOutput(); err != nil {
+			loadgenErr = fmt.Errorf("go build loadgen in %s: %w\n%s", build.Dir, err, output)
 		}
 	})
 	if loadgenErr != nil {
-		t.Fatalf("go build loadgen: %v\n%s", loadgenErr, loadgenPath)
+		t.Fatal(loadgenErr)
 	}
 	return loadgenPath
 }

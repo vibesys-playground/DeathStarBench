@@ -16,7 +16,9 @@
 //	                      ZSET "<user_id>:followees"  member "<followee_id>", score follow timestamp
 //
 // The caches (memcached, user-timeline-redis) are left empty. The indexes
-// are the ones the services create at startup.
+// are the ones the services create at startup plus those on the other keys the
+// services look documents up by (user.username, user.user_id,
+// user-timeline.user_id), as a production database would have them.
 package seed
 
 import (
@@ -66,13 +68,13 @@ func MongoCollections(data *dataset.Dataset) []Collection {
 	}
 	return []Collection{
 		{Target: "user-mongodb", Database: "user", Name: "user", Count: len(data.Users),
-			Document: func(index int) bson.D { return UserDocument(&data.Users[index]) }},
+			Document: func(index int) bson.D { return UserDocument(&data.Users[index]) }, UniqueKeys: []string{"username", "user_id"}},
 		{Target: "social-graph-mongodb", Database: "social-graph", Name: "social-graph", Count: len(data.Users),
 			Document: func(index int) bson.D { return SocialGraphDocument(data, index) }, UniqueKeys: []string{"user_id"}},
 		{Target: "post-storage-mongodb", Database: "post", Name: "post", Count: len(data.Posts),
 			Document: func(index int) bson.D { return PostDocument(data, &data.Posts[index]) }, UniqueKeys: []string{"post_id"}},
 		{Target: "user-timeline-mongodb", Database: "user-timeline", Name: "user-timeline", Count: len(withPosts),
-			Document: func(index int) bson.D { return UserTimelineDocument(data, withPosts[index]) }},
+			Document: func(index int) bson.D { return UserTimelineDocument(data, withPosts[index]) }, UniqueKeys: []string{"user_id"}},
 		{Target: "url-shorten-mongodb", Database: "url-shorten", Name: "url-shorten", Count: len(urls),
 			Document: func(index int) bson.D {
 				return bson.D{{Key: "shortened_url", Value: urls[index].Shortened}, {Key: "expanded_url", Value: urls[index].Expanded}}

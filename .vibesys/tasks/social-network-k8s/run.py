@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""Trusted wrapper for the social-network-k8s task: check and benchmark jobs.
+"""Trusted wrapper for the social-network-k8s task: the accuracy check.
 
     run.py check     --project-root ROOT
-    run.py benchmark --project-root ROOT --vs-output PATH     (result protocol 2)
     run.py sweep                                              (delete stale namespaces only)
     run.py ctl       --namespace NS --port PORT restart DEPLOYMENT | flush CACHE
                                                               (the checker's restart hook)
 
-Every job builds the candidate image from ROOT/socialNetwork (the C++ services and
-nginx-thrift with its Lua scripts) and the task's evaluator image (loadgen, seed) with
-buildctl, pushes them to the registry, deploys the task-owned data tier into a fresh
-namespace of the cluster, then the application (two replicas of every service), waits
-for readiness, seeds the task's dataset (a Job), runs the checker or the load
-generator, and deletes the namespace on every exit path (normal, error, SIGTERM,
-SIGINT, SIGHUP). Only SIGKILL (which is what the CLI sends on cancel and timeout)
+The benchmark is bench.py, on vibesys-evaluator. The check builds the candidate image
+from ROOT/socialNetwork (the C++ services and nginx-thrift with its Lua scripts) and
+the task's seed image with buildctl, pushes them to the registry, deploys the
+task-owned data tier into a fresh namespace of the cluster, seeds the task's dataset
+(a Job), deploys the application (two replicas of every service), waits for
+readiness, runs the checker (the oracle of evaluator/internal/oracle, which the
+benchmark's generator checks its responses with too), and deletes the namespace on
+every exit path (normal, error, SIGTERM, SIGINT, SIGHUP). Only SIGKILL (which is what the CLI sends on cancel and timeout)
 leaks a namespace; the next job sweeps stale ones (see sweep_stale_namespaces).
 
 Environment (set by the vibesys-cli `kubernetes` resource, or by hand):
@@ -21,14 +21,13 @@ Environment (set by the vibesys-cli `kubernetes` resource, or by hand):
     VIBESYS_K8S_REGISTRY    registry address as both the builder and the cluster's
                             nodes resolve it, for example localhost:5001 (required)
     VIBESYS_K8S_BUILDER     BuildKit address, for example tcp://127.0.0.1:1234 (required)
-    VIBESYS_ARTIFACTS_DIR   optional; logs, summaries, seeds.json, offered-rate.json
+    VIBESYS_ARTIFACTS_DIR   optional; build.json, seed logs, pods and container logs
 """
 
 from __future__ import annotations
 
 import argparse
 import atexit
-import base64
 import calendar
 import hashlib
 import itertools
@@ -51,7 +50,6 @@ from pathlib import Path
 TASK = "social-network-k8s"
 TASK_DIR = Path(__file__).resolve().parent
 MANIFEST = TASK_DIR / "k8s" / "manifest.yaml"
-WORKLOADS = TASK_DIR / "workload"
 # Namespaces are hk8s-sn-<hex>. The label keys are this task's own: hotel-k8s sweeps
 # namespaces labelled vibesys.dev/hotel-k8s, this task only those labelled with its key.
 NAMESPACE_PREFIX = "hk8s-sn-"
@@ -60,10 +58,9 @@ CREATED_LABEL = "vibesys.dev/social-network-k8s-created"  # epoch seconds
 JOB_LABEL = "vibesys.dev/social-network-k8s-job"
 SWEEP_MARGIN_SECONDS = 600
 
-LOADGEN_BASE = "busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
+SEED_BASE = "busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
 FRONTEND_SERVICE = "nginx-thrift"
 FRONTEND_PORT = 8080
-FRONTEND_URL = f"http://{FRONTEND_SERVICE}:{FRONTEND_PORT}"
 # Probes that must answer 200 through nginx-thrift before the deployment is ready.
 # They reach nginx, user-timeline (MongoDB, Redis), home-timeline (Redis), post-storage,
 # for a user id far from the dataset's (so the probes leave its caches alone).
@@ -82,19 +79,11 @@ STATELESS = [
 ]
 MEMCACHED = ["post-storage-memcached", "url-shorten-memcached", "user-memcached"]
 CACHE_REDIS = ["social-graph-redis", "user-timeline-redis"]
-# Load-generator pod: requests == limits, sized so the generator is never the bottleneck.
-LOADGEN_CPU = "6"
-LOADGEN_MEMORY = "4Gi"
 # Seed Job pod: requests == limits.
 SEED_CPU = "4"
 SEED_MEMORY = "2Gi"
 SEED_TIMEOUT_SECONDS = 1200
 READY_TIMEOUT_SECONDS = 300.0
-# The open-loop phase offers this fraction of the sample's closed-loop throughput.
-OPEN_LOOP_LOAD_FRACTION = 0.7
-# The open phase replays the closed phase's writes (--state-out / --state-in), so it
-# can validate timelines exactly on the same deployment.
-STATE_JOURNAL = True
 
 
 class JobError(Exception):
@@ -106,10 +95,10 @@ def log(message: str) -> None:
 
 
 def tool(name: str) -> str:
-    """Prebuilt binary: in the job image they are on PATH under /opt/vibesys/bin."""
+    """Prebuilt binary: on PATH in the task image (see the Dockerfile)."""
     found = shutil.which(name)
     if not found:
-        raise JobError(f"{name} not found on PATH (it is built into the task's Docker image)")
+        raise JobError(f"{name} not found on PATH (it is built into the task image)")
     return found
 
 
@@ -203,23 +192,15 @@ def build_candidate_image(project_root: Path, artifacts: Path | None) -> str:
     return image
 
 
-def build_evaluator_image(scratch: Path) -> str:
-    """The in-cluster evaluator image: loadgen, seed (when built) and the workloads."""
+def build_seed_image(scratch: Path) -> str:
+    """The in-cluster seed image: the task image's seed binary on busybox."""
     registry = require_env("VIBESYS_K8S_REGISTRY")
-    context = scratch / "evaluator"
-    (context / "workload").mkdir(parents=True)
-    binaries = ["loadgen", "seed"]
-    for name in binaries:
-        shutil.copy(tool(name), context / name)
-    for name in ("closed.toml", "open.toml"):
-        shutil.copy(WORKLOADS / name, context / "workload" / name)
-    (context / "Dockerfile").write_text(
-        f"FROM {LOADGEN_BASE}\n"
-        f"COPY {' '.join(binaries)} /usr/local/bin/\n"
-        "COPY workload/ /workload/\n"
-    )
-    image = f"{registry}/{TASK}/evaluator:{tree_digest(context)}"
-    log(f"building evaluator image {image}")
+    context = scratch / "seed-image"
+    context.mkdir(parents=True)
+    shutil.copy(tool("seed"), context / "seed")
+    (context / "Dockerfile").write_text(f"FROM {SEED_BASE}\nCOPY seed /usr/local/bin/\n")
+    image = f"{registry}/{TASK}/seed:{tree_digest(context)}"
+    log(f"building seed image {image}")
     buildctl_build(context, image, timeout=600)
     return image
 
@@ -367,7 +348,7 @@ class Deployment:
         self.created = False
         self.forwarder: Forwarder | None = None
 
-    def create(self, image: str, evaluator_image: str, artifacts: Path | None) -> None:
+    def create(self, image: str, seed_image: str, artifacts: Path | None) -> None:
         self.created = True  # even a half-created namespace must be deleted
         self.kube.kubectl("create", "namespace", self.name, namespaced=False)
         self.kube.kubectl(
@@ -388,7 +369,7 @@ class Deployment:
         log(f"data tier available after {time.monotonic() - started:.0f}s")
         # The dataset is written into the data tier before any request reaches the
         # application (the services read what they find).
-        seed_dataset(self, evaluator_image, artifacts)
+        seed_dataset(self, seed_image, artifacts)
         log("deploying the application")
         self.kube.kubectl("apply", "-f", "-", input_text=services)
         result = self.kube.kubectl(
@@ -590,54 +571,6 @@ def restart_command_json(namespace: str, port: int) -> str:
 
 # ---- Jobs inside the namespace ----
 
-LOADGEN_JOB = """\
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: {name}
-spec:
-  backoffLimit: 0
-  ttlSecondsAfterFinished: 600
-  template:
-    spec:
-      restartPolicy: Never
-      terminationGracePeriodSeconds: 5
-      enableServiceLinks: false
-      containers:
-      - name: loadgen
-        image: {image}
-        imagePullPolicy: IfNotPresent
-        resources:
-          requests: {{cpu: "{cpu}", memory: {memory}}}
-          limits: {{cpu: "{cpu}", memory: {memory}}}
-        command: ["sh", "-c"]
-        args:
-        - |
-          {prelude}loadgen --mode benchmark --workload /workload/{workload}.toml \\
-            --base-url {url} --startup-timeout 120 --seed {seed} --fixture-seed {fixture_seed}{extra} \\
-            --output-json /tmp/summary.json --vs-output /tmp/stream.jsonl
-          rc=$?
-          echo "::summary::"; cat /tmp/summary.json 2>/dev/null
-          echo "::stream::"; cat /tmp/stream.jsonl 2>/dev/null
-          echo "::state::"; [ -f /tmp/state.out ] && base64 /tmp/state.out
-          echo "::end::"
-          exit $rc{mounts}
-"""
-
-# The closed phase's write journal (loadgen --state-out) reaches the open phase's Job
-# (--state-in) as ConfigMaps of at most this many bytes each (the API limit is 1 MiB).
-STATE_CHUNK_BYTES = 700 * 1024
-STATE_MOUNTS = """
-        volumeMounts:
-        - name: state
-          mountPath: /state
-          readOnly: true
-      volumes:
-      - name: state
-        projected:
-          sources:
-{sources}"""
-
 SEED_JOB = """\
 apiVersion: batch/v1
 kind: Job
@@ -710,149 +643,29 @@ def seed_dataset(deployment: Deployment, image: str, artifacts: Path | None) -> 
     if artifacts:
         (artifacts / "seed.summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     log(f"seeded the dataset in {seconds:.0f}s: {json.dumps(summary)[:400]}")
-    create_indexes(deployment)
     return summary
 
 
-# Indexes on the keys the services look documents up by, as a production database
-# would have (social-graph user_id, post post_id and url-shorten shortened_url are
-# created by the seed and by the services themselves).
-INDEXES = [
-    ("user-mongodb", "user", "user", "{username: 1}", "{unique: true}"),
-    ("user-mongodb", "user", "user", "{user_id: 1}", "{unique: true}"),
-    ("user-timeline-mongodb", "user-timeline", "user-timeline", "{user_id: 1}", "{unique: true}"),
-]
-
-
-def create_indexes(deployment: Deployment) -> None:
-    for target, database, collection, keys, options in INDEXES:
-        script = (f"db.getSiblingDB('{database}').getCollection('{collection}')"
-                  f".createIndex({keys}, {options})")
-        deployment.kube.kubectl("exec", f"deployment/{target}", "--", "mongo", "--quiet",
-                                "--eval", script, timeout=120)
-    log(f"created {len(INDEXES)} indexes")
-
-
-def draw_seeds() -> dict:
-    """Fresh load seeds for one phase of one sample (recorded so it can be replayed)."""
-    return {"seed": secrets.randbelow(2**31), "fixture_seed": secrets.randbelow(2**31)}
-
-
-def put_state(deployment: Deployment, state: bytes) -> str:
-    """Store a write journal as ConfigMaps; return the Job's projected-volume sources."""
-    sources = []
-    for index in range(0, max(len(state), 1), STATE_CHUNK_BYTES):
-        part = f"loadgen-state-{index // STATE_CHUNK_BYTES:02d}"
-        path = scratch_file(deployment, part)
-        path.write_bytes(state[index:index + STATE_CHUNK_BYTES])
-        deployment.kube.kubectl("create", "configmap", part, f"--from-file=part={path}")
-        sources.append(f"          - configMap:\n              name: {part}\n"
-                       f"              items: [{{key: part, path: {part}}}]")
-    return "\n".join(sources)
-
-
-def scratch_file(deployment: Deployment, name: str) -> Path:
-    return deployment.scratch / name
-
-
-def run_phase(deployment: Deployment, image: str, workload: str, artifacts: Path | None,
-              seeds: dict, rate: float | None = None, state_in: bytes | None = None,
-              state_out: bool = False) -> tuple[dict, bytes | None]:
-    """Run one load-generator Job in the namespace.
-
-    Returns its protocol-2 result values and, with state_out, the write journal the
-    load generator left (to replay in a later phase with state_in). rate, when given,
-    overrides the workload's offered rate (operations/s).
-    """
-    name = f"loadgen-{workload}"
-    extra = f" --rate {rate:.2f}" if rate is not None else ""
-    prelude = mounts = ""
-    if state_out:
-        extra += " --state-out /tmp/state.out"
-    if state_in is not None:
-        mounts = STATE_MOUNTS.format(sources=put_state(deployment, state_in))
-        prelude = "cat /state/loadgen-state-* > /tmp/state.in || exit 1\n          "
-        extra += " --state-in /tmp/state.in"
-    log(f"phase {workload}: starting Job {name} (seed {seeds['seed']}, fixture seed "
-        f"{seeds['fixture_seed']})" + (f" at {rate:.2f} ops/s" if rate is not None else ""))
-    manifest = LOADGEN_JOB.format(
-        name=name, image=image, cpu=LOADGEN_CPU, memory=LOADGEN_MEMORY, workload=workload,
-        url=FRONTEND_URL, extra=extra, seed=seeds["seed"], fixture_seed=seeds["fixture_seed"],
-        prelude=prelude, mounts=mounts,
-    )
-    deployment.kube.kubectl("apply", "-f", "-", input_text=manifest)
-    _, logs = wait_job(deployment, name, 1500)
-    if "::summary::" in logs and "::stream::" in logs and "::state::" in logs:
-        head, _, rest = logs.partition("::stream::")
-        stream_text, _, state_text = rest.partition("::state::")
-        state_text = state_text.partition("::end::")[0]
-        summary_text = head.partition("::summary::")[2]
-        log(f"phase {workload} loadgen output:\n" + head.partition("::summary::")[0][-1500:])
-    else:
-        if artifacts:
-            (artifacts / f"{name}.log").write_text(logs)
-        raise JobError(f"Job {name} produced no result stream; log tail:\n{logs[-1500:]}")
-    state = None
-    if state_out:
-        encoded = "".join(state_text.split())
-        if not encoded:
-            raise JobError(f"phase {workload} left no write journal (--state-out)")
-        state = base64.b64decode(encoded)
-    if artifacts:
-        (artifacts / f"{name}.log").write_text(logs.partition("::summary::")[0])
-        (artifacts / f"{name}.summary.json").write_text(summary_text)
-        (artifacts / f"{name}.stream.jsonl").write_text(stream_text)
-        if state is not None:
-            (artifacts / f"{name}.state.gz").write_bytes(state)
-    values = None
-    for line in stream_text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        record = json.loads(line)
-        if record["kind"] == "error":
-            raise JobError(f"phase {workload} failed: {record['message']}")
-        if record["kind"] == "result":
-            values = record["values"]
-    if values is None:
-        raise JobError(f"phase {workload} wrote no result record")
-    return values, state
-
-
-def write_stream(path: Path, records: list[dict]) -> None:
-    path.write_text("".join(json.dumps(record) + "\n" for record in records))
-
-
-HELLO = {
-    "kind": "hello",
-    "protocol": 2,
-    "metrics": {
-        "operations_per_second": {"unit": "ops/s", "direction": "max"},
-        "latency_ms.p99": {"unit": "ms", "direction": "min"},
-    },
-}
-
-
-def prepare(project_root: Path, scratch: Path, artifacts: Path | None) -> tuple[Deployment, str]:
-    """Build both images, deploy, wait for readiness and seed; return (deployment, evaluator image)."""
+def prepare(project_root: Path, scratch: Path, artifacts: Path | None) -> Deployment:
+    """Build both images, deploy, seed and wait for readiness."""
     deployment = Deployment(scratch)
     atexit.register(deployment.delete)
     sweep_stale_namespaces()
     image = build_candidate_image(project_root, artifacts)
-    evaluator_image = build_evaluator_image(scratch)
+    seed_image = build_seed_image(scratch)
     try:
-        deployment.create(image, evaluator_image, artifacts)
+        deployment.create(image, seed_image, artifacts)
         deployment.start_forward()
         deployment.wait_ready()
     except JobError:
         deployment.save_pods(artifacts, "pods.txt")
         raise
-    return deployment, evaluator_image
+    return deployment
 
 
 def do_check(project_root: Path, scratch: Path) -> int:
     artifacts = artifacts_dir()
-    deployment, _ = prepare(project_root, scratch, artifacts)
+    deployment = prepare(project_root, scratch, artifacts)
     log("running the checker")
     started = time.monotonic()
     completed = subprocess.run(
@@ -871,55 +684,11 @@ def do_check(project_root: Path, scratch: Path) -> int:
     return completed.returncode
 
 
-def do_benchmark(project_root: Path, scratch: Path, output: Path) -> int:
-    write_stream(output, [HELLO])
-    artifacts = artifacts_dir()
-    deployment = None
-    try:
-        deployment, evaluator_image = prepare(project_root, scratch, artifacts)
-        seeds = {"closed": draw_seeds(), "open": draw_seeds()}
-        if artifacts:
-            (artifacts / "seeds.json").write_text(json.dumps(seeds, indent=2) + "\n")
-        closed, journal = run_phase(deployment, evaluator_image, "closed", artifacts,
-                                    seeds["closed"], state_out=STATE_JOURNAL)
-        throughput = closed["operations_per_second"]
-        # p99 is measured at a fixed fraction of this sample's own closed-loop
-        # throughput, so a faster candidate is held to proportionally more load.
-        offered = OPEN_LOOP_LOAD_FRACTION * throughput
-        if artifacts:
-            (artifacts / "offered-rate.json").write_text(json.dumps({
-                "closed_loop_operations_per_second": throughput,
-                "open_loop_load_fraction": OPEN_LOOP_LOAD_FRACTION,
-                "open_loop_offered_operations_per_second": offered,
-            }) + "\n")
-        open_loop, _ = run_phase(deployment, evaluator_image, "open", artifacts, seeds["open"],
-                                 rate=offered, state_in=journal)
-        p99 = open_loop["latency_ms.p99"]
-        deployment.save_pods(artifacts, "pods.txt")
-        log(f"closed loop: {throughput:.1f} ops/s; open loop at {offered:.1f} ops/s "
-            f"({OPEN_LOOP_LOAD_FRACTION:.0%}): p99 {p99:.2f} ms")
-        write_stream(output, [HELLO, {
-            "kind": "result", "label": "",
-            "values": {"operations_per_second": throughput, "latency_ms.p99": p99},
-        }])
-        return 0
-    except (JobError, subprocess.TimeoutExpired, KeyError, json.JSONDecodeError) as error:
-        message = str(error) or type(error).__name__
-        log(f"benchmark failed: {message}")
-        if deployment is not None and deployment.created:
-            deployment.save_pods(artifacts, "pods.txt")
-        write_stream(output, [HELLO, {"kind": "error", "message": message[:2000]}])
-        return 1
-
-
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("check", "benchmark"):
-        p = sub.add_parser(name)
-        p.add_argument("--project-root", type=Path, required=True)
-        if name == "benchmark":
-            p.add_argument("--vs-output", type=Path, required=True)
+    p = sub.add_parser("check")
+    p.add_argument("--project-root", type=Path, required=True)
     sub.add_parser("sweep")
     p = sub.add_parser("ctl")
     p.add_argument("--namespace", required=True)
@@ -950,9 +719,7 @@ def main(argv: list[str]) -> int:
             return ctl(args.namespace, args.port, args.action, args.target)
         require_env("VIBESYS_K8S_REGISTRY")
         require_env("VIBESYS_K8S_BUILDER")
-        if args.command == "check":
-            return do_check(args.project_root.resolve(), scratch)
-        return do_benchmark(args.project_root.resolve(), scratch, args.vs_output)
+        return do_check(args.project_root.resolve(), scratch)
     except (JobError, subprocess.TimeoutExpired) as error:
         log(f"failed: {error}")
         return 1
