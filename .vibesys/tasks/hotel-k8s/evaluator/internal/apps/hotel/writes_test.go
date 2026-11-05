@@ -86,9 +86,11 @@ func TestMixedReadsAndWritesAgainstAFake(t *testing.T) {
 		if !validation.Success {
 			t.Fatalf("%s sample %d: %+v", name, random, validation)
 		}
-		if request := runtime.requests[before]; (name == operationSearch || name == operationRecommendDistance) &&
-			strings.HasPrefix(request.Query["lat"], "-") && strings.HasPrefix(request.Query["lon"], "-1") {
-			sandboxReads++
+		request := runtime.requests[before]
+		lat, _ := strconv.ParseFloat(request.Query["lat"], 64)
+		lon, _ := strconv.ParseFloat(request.Query["lon"], 64)
+		if (name == operationSearch || name == operationRecommendDistance) && lat < -19 && lon < -84 {
+			sandboxReads++ // the sandbox region, far from every seeded city
 		}
 	}
 	if sandboxReads == 0 {

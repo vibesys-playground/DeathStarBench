@@ -93,7 +93,32 @@ const (
 	// reservationCycles 400-year Gregorian cycles from 3000-01-01 hold the
 	// blocks (years 3000 through 9799, still four-digit dates).
 	reservationCycles = 17
+	reservationBlocks = reservationCycles * 146097 / reservationBlockDays
+
+	// TrialsPerRun bounds the trials (repetitions) of one load-generator
+	// run. A run owns TrialsPerRun consecutive trial slots, and RunSlots runs
+	// fit in the reservation blocks.
+	TrialsPerRun = 16
+	RunSlots     = reservationBlocks / TrialsPerRun
 )
+
+// TrialSlot is the trial's fixture namespace, in [0, RunSlots*TrialsPerRun):
+// its reservation block, its additions' sandbox cell (a multiple of the
+// slot), and the high bits of
+// its added hotels' ID tag. The run's fixture seed F (the engine passes
+// trial.FixtureSeed = F + trial.Index) selects run slot F mod RunSlots,
+// and the trial index the slot within it. So the trials of one run never
+// share a slot, and two runs whose fixture seeds differ by 1 to RunSlots-1
+// (run.py gives the open phase the closed phase's seed plus 1) are disjoint
+// by construction: nights, sandbox cells and hotel IDs.
+func TrialSlot(trial api.TrialContext) (uint64, error) {
+	if trial.Index < 0 || trial.Index >= TrialsPerRun {
+		return 0, fmt.Errorf("Hotel runs at most %d trials, got trial index %d", TrialsPerRun, trial.Index)
+	}
+	run := trial.FixtureSeed - int64(trial.Index)
+	slot := ((run % RunSlots) + RunSlots) % RunSlots
+	return uint64(slot)*TrialsPerRun + uint64(trial.Index), nil
+}
 
 var _ api.Application = (*Application)(nil)
 var _ api.PreflightApplication = (*Application)(nil)
@@ -138,22 +163,21 @@ func (a *Application) PreflightProbes() []api.ReadinessProbe {
 
 func (a *Application) Prepare(_ context.Context, _ api.Runtime, trial api.TrialContext) (any, error) {
 	// Reserve only far-future nights, outside the rate window that searches
-	// use, and give every trial its own block of them without setup-only
-	// traffic. The fixture seed's digest places the run's first block; trials
-	// of one run take consecutive blocks, so they never share a night, and
-	// runs with different fixture seeds (the phases of one job) collide only
-	// if their digests land within a few blocks of each other (about 1 in
-	// 1000 for two phases of 2 and 3 trials).
-	digest := sha256.Sum256([]byte(fmt.Sprintf("hotel-reservations/%d", trial.FixtureSeed)))
+	// use, and add hotels only in the trial's own sandbox cell: the trial
+	// slot (see TrialSlot) places both, without setup-only traffic.
+	slot, err := TrialSlot(trial)
+	if err != nil {
+		return nil, err
+	}
 	rangeStart := time.Date(3000, time.January, 1, 12, 0, 0, 0, time.UTC)
-	const blocks = reservationCycles * 146097 / reservationBlockDays
-	block := (binary.BigEndian.Uint64(digest[:8]) + uint64(trial.Index)) % blocks
-	// Hotel additions go to a sandbox cell of the trial (fixture seed and
-	// index); two trials share a cell with probability 1/SandboxCount.
+	// The tag's low bits vary the added hotels' IDs between jobs; its high
+	// bits (the slot) keep them distinct between the trials of a namespace.
 	additions := sha256.Sum256([]byte(fmt.Sprintf("hotel-additions/%d/%d", trial.FixtureSeed, trial.Index)))
+	// Cells spread the slots over the whole sandbox region.
+	cellStride := dataset.SandboxCount() / (RunSlots * TrialsPerRun)
 	return &fixture{
-		dateBase: rangeStart.AddDate(0, 0, int(block)*reservationBlockDays),
-		sandbox:  binary.BigEndian.Uint64(additions[:8]),
-		tag:      binary.BigEndian.Uint64(additions[8:16]) >> 16,
+		dateBase: rangeStart.AddDate(0, 0, int(slot)*reservationBlockDays),
+		sandbox:  slot * cellStride,
+		tag:      slot<<32 | uint64(binary.BigEndian.Uint32(additions[:4])),
 	}, nil
 }

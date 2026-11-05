@@ -635,8 +635,9 @@ func TestFixtureDateNamespaceIsDeterministicAndSeedDifferentiated(t *testing.T) 
 	if days%reservationBlockDays != 0 {
 		t.Fatalf("namespace date %s is not aligned to a %d-day block", first.Format(time.DateOnly), reservationBlockDays)
 	}
-	// Trials of one run take consecutive blocks: they never share a night.
-	if next := prepare(3, 99); next != first.AddDate(0, 0, reservationBlockDays) && next.Year() != 3000 {
+	// Trials of one run (the engine passes run seed + index) take
+	// consecutive blocks: they never share a night.
+	if next := prepare(3, 100); next != first.AddDate(0, 0, reservationBlockDays) {
 		t.Fatalf("trial 3 block starts %s, trial 2 %s", next.Format(time.DateOnly), first.Format(time.DateOnly))
 	}
 	last := first.AddDate(0, 0, reservationBlockDays-1)
