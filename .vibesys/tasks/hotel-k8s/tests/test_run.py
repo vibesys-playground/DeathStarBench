@@ -2,7 +2,6 @@
 
 import importlib.util
 import json
-import random
 import sys
 import tempfile
 import unittest
@@ -25,60 +24,35 @@ def flag(argv: list[str], name: str) -> str:
 
 
 class SeedTest(unittest.TestCase):
-    def test_fresh_seeds_per_sample(self):
-        draws = [run.draw_sample_seeds() for _ in range(50)]
-        for seeds in draws:
-            for phase in ("closed", "open"):
-                for key in ("seed", "fixture_seed"):
-                    self.assertTrue(0 <= seeds[phase][key] <= run.SEED_LIMIT)
-                    self.assertLess(seeds[phase][key], 2**63 - 1)
-        self.assertEqual(len({seeds["closed"]["fixture_seed"] for seeds in draws}), len(draws))
-        self.assertEqual(len({seeds["closed"]["seed"] for seeds in draws}), len(draws))
-
-    def test_open_fixture_seed_is_derived_from_the_closed_one(self):
-        # TrialSlot (evaluator/internal/apps/hotel) makes runs whose fixture seeds
-        # differ by 1 to RunSlots-1 disjoint; the Go property test covers it.
-        values = iter([7, 100, 200])
-        seeds = run.draw_sample_seeds(lambda limit: next(values))
-        self.assertEqual(seeds, {
-            "closed": {"seed": 100, "fixture_seed": 7},
-            "open": {"seed": 200, "fixture_seed": 8},
-        })
-        for closed in (0, 47, run.SEED_LIMIT - 1, random.randrange(run.SEED_LIMIT)):
-            self.assertEqual(run.open_fixture_seed(closed) - closed, 1)
-
     def test_seeds_are_recorded(self):
         with tempfile.TemporaryDirectory() as directory:
-            seeds = run.draw_sample_seeds()
-            run.write_seeds(Path(directory), seeds)
-            self.assertEqual(json.loads((Path(directory) / "seeds.json").read_text()), seeds)
+            run.write_seeds(Path(directory), {"oracle": {"seed": 5}})
+            self.assertEqual(json.loads((Path(directory) / "seeds.json").read_text()), {"oracle": {"seed": 5}})
 
 
 class ManifestTest(unittest.TestCase):
-    def test_loadgen_job_passes_the_phase_seeds(self):
-        seeds = {"seed": 123, "fixture_seed": 456}
-        job = run.loadgen_job("registry/loadgen:x", "open", seeds, 701.234)
-        argv = container(job)["command"]
-        self.assertEqual(argv[:2], ["sh", "-c"])
-        self.assertEqual(flag(argv, "--seed"), "123")
-        self.assertEqual(flag(argv, "--fixture-seed"), "456")
-        self.assertEqual(flag(argv, "--rate"), "701.23")
-        self.assertEqual(flag(argv, "--workload"), "/workload/open.toml")
-        self.assertNotIn("--rate", run.loadgen_job("i", "closed", seeds, None)["spec"]["template"]["spec"]["containers"][0]["command"])
+    def test_seed_job_runs_the_benchmarks_seed(self):
+        job = run.seed_job("registry/task:x", "ab" * 32)
+        self.assertEqual(container(job)["command"], ["python", "/task/bench.py", "seed", "--dataset-digest", "ab" * 32])
         resources = container(job)["resources"]
         self.assertEqual(resources["requests"], resources["limits"])
         self.assertFalse(job["spec"]["template"]["spec"]["automountServiceAccountToken"])
 
     def test_oracle_job(self):
-        job = run.oracle_job("registry/loadgen:x", 987654321)
+        job = run.oracle_job("registry/task:x", 987654321)
         self.assertEqual(job["kind"], "Job")
         self.assertEqual(job["metadata"]["name"], "oracle")
         pod = job["spec"]["template"]["spec"]
         self.assertEqual(pod["serviceAccountName"], run.EVALUATOR_ACCOUNT)
         self.assertEqual(pod["restartPolicy"], "Never")
         self.assertEqual(job["spec"]["backoffLimit"], 0)
-        argv = container(job)["command"]
+        command = container(job)["command"]
+        self.assertEqual(command[:2], ["sh", "-c"])
+        self.assertIn("python /task/dataset.py /tmp/dataset.json", command[2])
+        argv = command[4:]
         self.assertEqual(argv[0], "hotel-correctness")
+        self.assertEqual(flag(argv, "--dataset"), "/tmp/dataset.json")
+        self.assertEqual(flag(argv, "--workload"), "/task/workload/oracle.toml")
         self.assertEqual(flag(argv, "--mode"), "accuracy")
         self.assertEqual(flag(argv, "--seed"), "987654321")
         self.assertEqual(flag(argv, "--base-url"), "http://frontend:5000")

@@ -629,6 +629,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
+    tier: data
     helm.sh/chart: consul-0.1.0
     app.kubernetes.io/name: consul
     app.kubernetes.io/instance: hotel
@@ -849,6 +850,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
+    tier: data
     helm.sh/chart: jaeger-0.1.0
     app.kubernetes.io/name: jaeger
     app.kubernetes.io/instance: hotel
@@ -911,6 +913,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
+    tier: data
     helm.sh/chart: memcached-profile-0.1.0
     app.kubernetes.io/name: memcached-profile
     app.kubernetes.io/instance: hotel
@@ -974,6 +977,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
+    tier: data
     helm.sh/chart: memcached-rate-0.1.0
     app.kubernetes.io/name: memcached-rate
     app.kubernetes.io/instance: hotel
@@ -1037,6 +1041,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
+    tier: data
     helm.sh/chart: memcached-reserve-0.1.0
     app.kubernetes.io/name: memcached-reserve
     app.kubernetes.io/instance: hotel
@@ -1100,6 +1105,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
+    tier: data
     helm.sh/chart: mongodb-geo-0.1.0
     app.kubernetes.io/name: mongodb-geo
     app.kubernetes.io/instance: hotel
@@ -1164,6 +1170,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
+    tier: data
     helm.sh/chart: mongodb-profile-0.1.0
     app.kubernetes.io/name: mongodb-profile
     app.kubernetes.io/instance: hotel
@@ -1228,6 +1235,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
+    tier: data
     helm.sh/chart: mongodb-rate-0.1.0
     app.kubernetes.io/name: mongodb-rate
     app.kubernetes.io/instance: hotel
@@ -1292,6 +1300,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
+    tier: data
     helm.sh/chart: mongodb-recommendation-0.1.0
     app.kubernetes.io/name: mongodb-recommendation
     app.kubernetes.io/instance: hotel
@@ -1356,6 +1365,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
+    tier: data
     helm.sh/chart: mongodb-reservation-0.1.0
     app.kubernetes.io/name: mongodb-reservation
     app.kubernetes.io/instance: hotel
@@ -1420,6 +1430,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
+    tier: data
     helm.sh/chart: mongodb-user-0.1.0
     app.kubernetes.io/name: mongodb-user
     app.kubernetes.io/instance: hotel

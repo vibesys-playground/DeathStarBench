@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
-"""Trusted wrapper for the hotel-k8s task: check and benchmark jobs.
+"""Trusted wrapper for the hotel-k8s task's accuracy check (the benchmark is bench.py).
 
     run.py check     --project-root ROOT
-    run.py benchmark --project-root ROOT --vs-output PATH     (result protocol 2)
     run.py sweep                                              (delete stale namespaces only)
 
-Every job builds the candidate image from ROOT/hotelReservation and the task's
-evaluator image (loadgen, seed, hotel-correctness, podctl) with buildctl, pushes
-them to the registry, deploys the task-owned data tier into a fresh namespace of
-the cluster, seeds MongoDB with the task's dataset (a Job), deploys the
-application services (two replicas each), waits until every replica serves (Job
-"ready"), runs the oracle (Job "oracle") or the load generator (Jobs
-"loadgen-closed", "loadgen-open") inside the namespace, and deletes the
-namespace on every exit path (normal, error, SIGTERM, SIGINT, SIGHUP). Only
-SIGKILL (which is what the CLI sends on cancel and timeout) leaks a namespace;
-the next job sweeps stale ones (see sweep_stale_namespaces).
+The check builds the candidate image from ROOT/hotelReservation and the task
+image (this directory: dataset.py, bench.py, hotel-correctness, podctl) with
+buildctl, pushes them to the registry, deploys the task-owned data tier into a
+fresh namespace of the cluster, seeds MongoDB with the task's dataset (Job
+"seed": bench.py's seed, as a benchmark sample seeds), deploys the application
+services (two replicas each), waits until every replica serves (Job "ready"),
+runs the semantic oracle over dataset.py's dataset file (Job "oracle") inside
+the namespace, and deletes the namespace on every exit path (normal, error,
+SIGTERM, SIGINT, SIGHUP). Only SIGKILL (which is what the CLI sends on cancel
+and timeout) leaks a namespace; the next job sweeps stale ones (see
+sweep_stale_namespaces).
 
 Environment (set by the vibesys-cli `kubernetes` resource, or by hand):
     KUBECONFIG              kubeconfig of the cluster (required)
     VIBESYS_K8S_REGISTRY    registry address as both the builder and the cluster's
                             nodes resolve it, for example localhost:5001 (required)
     VIBESYS_K8S_BUILDER     BuildKit address, for example tcp://127.0.0.1:1234 (required)
-    VIBESYS_ARTIFACTS_DIR   optional; logs, summaries, seeds.json and pod usage go there
+    VIBESYS_ARTIFACTS_DIR   optional; logs and seeds.json go there
 """
 
 from __future__ import annotations
@@ -44,21 +44,12 @@ from pathlib import Path
 
 TASK_DIR = Path(__file__).resolve().parent
 MANIFEST = TASK_DIR / "k8s" / "manifest.yaml"
-WORKLOADS = TASK_DIR / "workload"
+ORACLE_WORKLOAD = "/task/workload/oracle.toml"  # in the task image
 NAMESPACE_LABEL = "vibesys.dev/hotel-k8s"
 CREATED_LABEL = "vibesys.dev/hotel-k8s-created"  # epoch seconds
 JOB_LABEL = "vibesys.dev/hotel-k8s-job"
 SWEEP_MARGIN_SECONDS = 600
 
-def tool(name: str) -> str:
-    """Prebuilt binary: in the job image they are on PATH under /opt/vibesys/bin."""
-    found = shutil.which(name)
-    if not found:
-        raise JobError(f"{name} not found on PATH (it is built into the task's Docker image)")
-    return found
-
-
-LOADGEN_BASE = "busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
 FRONTEND_URL = "http://frontend:5000"
 # The application Deployments (two replicas each). They start only after the
 # seed Job has filled MongoDB: each service seeds its own test data into an
@@ -76,28 +67,24 @@ PROBE_PATHS = [
     "/hotels?inDate=2300-01-01&outDate=2300-01-02&lat=37.7867&lon=-122.4112",
 ]
 READY_TIMEOUT_SECONDS = 300
-# Load-generator pod: requests == limits. It is sized so the generator is never
-# the bottleneck: 32 closed-loop workers or 512 open-loop workers.
-LOADGEN_CPU = "6"
-LOADGEN_MEMORY = "4Gi"
-# Oracle pod (requests == limits): one client at a time, bursts of 8.
+# Oracle pod (requests == limits): one client at a time, bursts of 8. It first
+# writes dataset.py's dataset file (about 3 s, 26 MB).
 ORACLE_CPU = "2"
 ORACLE_MEMORY = "2Gi"
 ORACLE_TIMEOUT_SECONDS = 1200
 # Ready Job pod: podctl polls the API, consul and the frontend pods.
 READY_CPU = "500m"
 READY_MEMORY = "128Mi"
-# Seed Job pod: requests == limits. It generates the dataset (about 0.5 s) and
-# writes about 30 MB of documents into the six MongoDB servers concurrently.
-SEED_CPU = "2"
-SEED_MEMORY = "1Gi"
+# Seed Job pod: requests == limits. bench.py's seed generates the dataset (about
+# 3 s) and writes about 30 MB of documents into the six MongoDB servers concurrently.
+SEED_CPU = "4"
+SEED_MEMORY = "2Gi"
 SEED_TIMEOUT_SECONDS = 600
 # The service account of the oracle and ready Jobs: podctl reads Deployments and
 # pods and deletes pods of the namespace, nothing else. The application's pods
 # run as the namespace's default account, which may do nothing.
 EVALUATOR_ACCOUNT = "evaluator"
-# Seeds are drawn below this bound (they are int64 in the engine; the open
-# phase's fixture seed is the closed one's plus 1).
+# The oracle's seed is drawn below this bound (an int64 in the engine).
 SEED_LIMIT = 2**62
 
 
@@ -181,25 +168,27 @@ def build_hotel_image(project_root: Path) -> str:
     return image
 
 
-def build_loadgen_image(scratch: Path) -> str:
-    """The in-cluster evaluator image: loadgen, seed, the oracle, podctl and the workloads."""
+def build_task_image() -> str:
+    """The task image in the cluster's registry (this directory and its Dockerfile)."""
     registry = require_env("VIBESYS_K8S_REGISTRY")
-    context = scratch / "loadgen"
-    (context / "workload").mkdir(parents=True)
-    binaries = ("loadgen", "seed", "hotel-correctness", "podctl")
-    for name in binaries:
-        shutil.copy(tool(name), context / name)
-    for name in ("closed.toml", "open.toml"):
-        shutil.copy(WORKLOADS / name, context / "workload" / name)
-    (context / "Dockerfile").write_text(
-        f"FROM {LOADGEN_BASE}\n"
-        f"COPY {' '.join(binaries)} /usr/local/bin/\n"
-        "COPY workload/ /workload/\n"
-    )
-    image = f"{registry}/hotel-k8s/loadgen:{tree_digest(context)}"
-    log(f"building evaluator image {image}")
-    buildctl_build(context, image)
+    image = f"{registry}/hotel-k8s/task:{tree_digest(TASK_DIR, task_files())}"
+    log(f"building task image {image}")
+    buildctl_build(TASK_DIR, image)
     return image
+
+
+def task_files() -> list[Path]:
+    """The task directory's files, without the caches tools leave."""
+    return [p for p in TASK_DIR.rglob("*")
+            if "__pycache__" not in p.parts and p.suffix != ".pyc" and (p.is_file() or p.is_symlink())]
+
+
+def dataset_digest() -> str:
+    """The digest bench.py's seed checks: SHA-256 of dataset.py's dataset file."""
+    sys.path.insert(0, str(TASK_DIR))
+    import dataset  # noqa: PLC0415 - needs vibesys-evaluator, which the task image has
+
+    return hashlib.sha256(dataset.encode(dataset.generate())).hexdigest()
 
 
 def split_manifest(manifest: str) -> tuple[str, str]:
@@ -226,14 +215,13 @@ def split_manifest(manifest: str) -> tuple[str, str]:
 class Deployment:
     """A fresh namespace with the hotel application deployed in it."""
 
-    def __init__(self, scratch: Path):
-        self.scratch = scratch
+    def __init__(self):
         self.name = f"hk8s-{secrets.token_hex(4)}"
         self.kube = Kube(self.name)
         self.created = False
 
     # -- lifecycle ---------------------------------------------------------
-    def create(self, hotel_image: str, evaluator_image: str, artifacts: Path | None) -> None:
+    def create(self, hotel_image: str, evaluator_image: str, digest: str, artifacts: Path | None) -> None:
         self.created = True  # even a half-created namespace must be deleted
         self.kube.kubectl("create", "namespace", self.name, namespaced=False)
         self.kube.kubectl(
@@ -251,7 +239,7 @@ class Deployment:
             "wait", "--for=condition=Available", "deployment", "-l", "backend=mongodb",
             "--timeout=300s", timeout=330,
         )
-        seed_database(self, evaluator_image, artifacts)
+        seed_database(self, evaluator_image, digest, artifacts)
         log("deploying the application services")
         self.kube.kubectl("apply", "-f", "-", input_text=services)
         # Available needs every replica: maxUnavailable (25%) rounds down to 0.
@@ -408,123 +396,46 @@ def oracle_job(image: str, seed: int) -> dict:
     Its requests each open a connection, so kube-proxy spreads them over the
     frontend pods; its restarts go through podctl (one pod or all pods of each
     Deployment, see the accuracy adapter's Restarter)."""
-    command = [
+    oracle = [
         "hotel-correctness", "--mode", "accuracy",
-        "--workload", "/workload/closed.toml",
+        "--dataset", "/tmp/dataset.json",
+        "--workload", ORACLE_WORKLOAD,
         "--base-url", FRONTEND_URL,
         "--seed", str(seed),
         "--startup-timeout", str(READY_TIMEOUT_SECONDS),
         "--restart-command-json", json.dumps(podctl_command("restart")),
     ]
-    return job("oracle", image, command, ORACLE_CPU, ORACLE_MEMORY, EVALUATOR_ACCOUNT)
+    script = 'python /task/dataset.py /tmp/dataset.json && exec "$@"'
+    return job("oracle", image, ["sh", "-c", script, "oracle", *oracle], ORACLE_CPU, ORACLE_MEMORY,
+               EVALUATOR_ACCOUNT)
 
 
-def loadgen_job(image: str, workload: str, seeds: dict, rate: float | None) -> dict:
-    """One load-generator phase; its summary and result stream follow markers in its log."""
-    flags = [
-        "--mode", "benchmark", "--workload", f"/workload/{workload}.toml",
-        "--base-url", FRONTEND_URL, "--startup-timeout", "120",
-        "--seed", str(seeds["seed"]), "--fixture-seed", str(seeds["fixture_seed"]),
-    ]
-    if rate is not None:
-        flags += ["--rate", f"{rate:.2f}"]
-    flags += ["--output-json", "/tmp/summary.json", "--vs-output", "/tmp/stream.jsonl"]
-    script = (
-        'loadgen "$@"; rc=$?\n'
-        'echo "::summary::"; cat /tmp/summary.json 2>/dev/null\n'
-        'echo "::stream::"; cat /tmp/stream.jsonl 2>/dev/null\n'
-        'exit $rc\n'
-    )
-    return job(f"loadgen-{workload}", image, ["sh", "-c", script, "loadgen", *flags], LOADGEN_CPU, LOADGEN_MEMORY)
+def seed_job(image: str, digest: str) -> dict:
+    """bench.py's seed: it regenerates the dataset, checks its digest and writes MongoDB."""
+    return job("seed", image, ["python", "/task/bench.py", "seed", "--dataset-digest", digest],
+               SEED_CPU, SEED_MEMORY)
 
 
-def seed_job(image: str) -> dict:
-    return job("seed", image, ["seed", "--timeout", f"{SEED_TIMEOUT_SECONDS}s"], SEED_CPU, SEED_MEMORY)
-
-
-# ---- seeds ----
-
-def open_fixture_seed(closed: int) -> int:
-    """The open phase's fixture seed. Both phases run in one namespace and no
-    reservation can be deleted, so their fixtures (reservation nights, sandbox
-    cells, added hotel IDs) must be disjoint: the load generator's TrialSlot
-    (evaluator/internal/apps/hotel) makes runs whose fixture seeds differ by
-    1 to RunSlots-1 disjoint by construction."""
-    return closed + 1
-
-
-def draw_sample_seeds(randbelow=secrets.randbelow) -> dict:
-    """Fresh seeds for one benchmark sample: a workload seed per phase and the
-    closed phase's fixture seed, from which the open phase's is derived."""
-    closed_fixture = randbelow(SEED_LIMIT)
-    return {
-        "closed": {"seed": randbelow(SEED_LIMIT), "fixture_seed": closed_fixture},
-        "open": {"seed": randbelow(SEED_LIMIT), "fixture_seed": open_fixture_seed(closed_fixture)},
-    }
-
+# ---- jobs ----
 
 def write_seeds(artifacts: Path | None, seeds: dict) -> None:
-    """seeds.json: what a replay of this sample passes (--seed, --fixture-seed)."""
+    """seeds.json: what a replay of this check passes."""
     log("seeds: " + json.dumps(seeds, sort_keys=True))
     if artifacts:
         (artifacts / "seeds.json").write_text(json.dumps(seeds, indent=2, sort_keys=True) + "\n")
 
 
-# ---- per-pod usage, from the kubelet's summary ----
-
-def pod_usage(deployment: "Deployment") -> dict:
-    """CPU seconds and network bytes of every pod of the namespace, by pod name."""
-    pods = json.loads(deployment.kube.kubectl("get", "pods", "-o", "json").stdout)["items"]
-    usage: dict = {}
-    for node in sorted({pod["spec"].get("nodeName") for pod in pods} - {None}):
-        raw = Kube().kubectl("get", "--raw", f"/api/v1/nodes/{node}/proxy/stats/summary",
-                             namespaced=False, timeout=30)
-        for pod in json.loads(raw.stdout).get("pods", []):
-            ref = pod.get("podRef", {})
-            if ref.get("namespace") != deployment.name:
-                continue
-            usage[ref["name"]] = {
-                "cpu_seconds": round(pod.get("cpu", {}).get("usageCoreNanoSeconds", 0) / 1e9, 2),
-                "rx_bytes": pod.get("network", {}).get("rxBytes", 0),
-                "tx_bytes": pod.get("network", {}).get("txBytes", 0),
-                "start": pod.get("startTime", ""),
-            }
-    for pod in pods:
-        name = pod["metadata"]["name"]
-        if name in usage:
-            usage[name]["deployment"] = pod["metadata"].get("labels", {}).get("app.kubernetes.io/name", "")
-    return usage
-
-
-def report_pod_usage(deployment: "Deployment", artifacts: Path | None, label: str) -> None:
-    """Log the application pods' usage (both replicas of each service should work)."""
-    try:
-        usage = pod_usage(deployment)
-    except (JobError, subprocess.TimeoutExpired, KeyError, json.JSONDecodeError) as error:
-        log(f"pod usage {label}: unavailable ({error})")
-        return
-    lines = []
-    for name, item in sorted(usage.items()):
-        if item.get("deployment") in APP_DEPLOYMENTS:
-            lines.append(f"  {name}: {item['cpu_seconds']:.1f} CPU s, rx {item['rx_bytes'] / 1e6:.1f} MB, "
-                         f"tx {item['tx_bytes'] / 1e6:.1f} MB (since {item['start']})")
-    log(f"pod usage {label}:\n" + "\n".join(lines))
-    if artifacts:
-        (artifacts / f"pod-usage-{label}.json").write_text(json.dumps(usage, indent=2, sort_keys=True) + "\n")
-
-
-# ---- jobs ----
-
-def do_check(project_root: Path, scratch: Path) -> int:
-    deployment = Deployment(scratch)
+def do_check(project_root: Path) -> int:
+    deployment = Deployment()
     atexit.register(deployment.delete)
     sweep_stale_namespaces()
     artifacts = artifacts_dir()
     seed = secrets.randbelow(SEED_LIMIT)
     write_seeds(artifacts, {"oracle": {"seed": seed}})
+    digest = dataset_digest()
     image = build_hotel_image(project_root)
-    evaluator_image = build_loadgen_image(scratch)
-    deployment.create(image, evaluator_image, artifacts)
+    evaluator_image = build_task_image()
+    deployment.create(image, evaluator_image, digest, artifacts)
     log(f"running the semantic oracle (Job oracle, seed {seed})")
     deployment.kube.kubectl("apply", "-f", "-", input_text=json.dumps(oracle_job(evaluator_image, seed)))
     succeeded, logs = wait_job(deployment, "oracle", ORACLE_TIMEOUT_SECONDS)
@@ -556,136 +467,23 @@ def wait_job(deployment: Deployment, name: str, timeout: float) -> tuple[bool, s
     return bool(status.get("succeeded")), logs
 
 
-def seed_database(deployment: Deployment, image: str, artifacts: Path | None) -> dict:
+def seed_database(deployment: Deployment, image: str, digest: str, artifacts: Path | None) -> None:
     """Write the task's dataset into the namespace's MongoDB servers (Job "seed")."""
     log("seeding MongoDB with the task's dataset: starting Job seed")
     started = time.monotonic()
-    deployment.kube.kubectl("apply", "-f", "-", input_text=json.dumps(seed_job(image)))
+    deployment.kube.kubectl("apply", "-f", "-", input_text=json.dumps(seed_job(image, digest)))
     succeeded, logs = wait_job(deployment, "seed", SEED_TIMEOUT_SECONDS + 60)
     if artifacts:
         (artifacts / "seed.log").write_text(logs)
     if not succeeded:
         raise JobError(f"Job seed failed; log tail:\n{logs[-1500:]}")
-    summary = None
-    for line in logs.splitlines():
-        if line.startswith("{"):
-            summary = json.loads(line)
-    if summary is None or not summary.get("written"):
-        raise JobError(f"Job seed wrote no summary; log tail:\n{logs[-1500:]}")
-    if artifacts:
-        (artifacts / "seed.summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    documents = sum(item["documents"] for item in summary["written"])
-    log(f"seeded {documents} documents (dataset {summary['dataset_digest'][:16]}, "
-        f"documents {summary['documents_digest'][:16]}) in {time.monotonic() - started:.0f}s")
-    return summary
-
-
-def run_phase(deployment: Deployment, image: str, workload: str, artifacts: Path | None,
-              seeds: dict, rate: float | None = None) -> dict:
-    """Run one load-generator Job in the namespace; return its protocol-2 result values.
-
-    seeds are the phase's --seed and --fixture-seed; rate, when given, overrides
-    the workload's offered rate (operations/s).
-    """
-    name = f"loadgen-{workload}"
-    log(f"phase {workload}: starting Job {name} (seed {seeds['seed']}, fixture seed {seeds['fixture_seed']})"
-        + (f" at {rate:.2f} ops/s" if rate is not None else ""))
-    deployment.kube.kubectl("apply", "-f", "-", input_text=json.dumps(loadgen_job(image, workload, seeds, rate)))
-    _, logs = wait_job(deployment, name, 1500)
-    if artifacts:
-        (artifacts / f"{name}.log").write_text(logs)
-    summary_text = stream_text = ""
-    if "::summary::" in logs and "::stream::" in logs:
-        head, _, stream_text = logs.partition("::stream::")
-        summary_text = head.partition("::summary::")[2]
-        log(f"phase {workload} loadgen output:\n" + head.partition("::summary::")[0][-1500:])
-    else:
-        raise JobError(f"Job {name} produced no result stream; log tail:\n{logs[-1500:]}")
-    if artifacts:
-        (artifacts / f"{name}.summary.json").write_text(summary_text)
-        (artifacts / f"{name}.stream.jsonl").write_text(stream_text)
-    values = None
-    for line in stream_text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        record = json.loads(line)
-        if record["kind"] == "error":
-            raise JobError(f"phase {workload} failed: {record['message']}")
-        if record["kind"] == "result":
-            values = record["values"]
-    if values is None:
-        raise JobError(f"phase {workload} wrote no result record")
-    return values
-
-
-def write_stream(path: Path, records: list[dict]) -> None:
-    path.write_text("".join(json.dumps(record) + "\n" for record in records))
-
-
-# The open-loop phase offers this fraction of the sample's closed-loop throughput.
-OPEN_LOOP_LOAD_FRACTION = 0.7
-
-HELLO = {
-    "kind": "hello",
-    "protocol": 2,
-    "metrics": {
-        "operations_per_second": {"unit": "ops/s", "direction": "max"},
-        "latency_ms.p99": {"unit": "ms", "direction": "min"},
-    },
-}
-
-
-def do_benchmark(project_root: Path, scratch: Path, output: Path) -> int:
-    write_stream(output, [HELLO])
-    artifacts = artifacts_dir()
-    try:
-        deployment = Deployment(scratch)
-        atexit.register(deployment.delete)
-        sweep_stale_namespaces()
-        # Fresh seeds for every sample; seeds.json lets any sample be replayed.
-        seeds = draw_sample_seeds()
-        write_seeds(artifacts, seeds)
-        hotel_image = build_hotel_image(project_root)
-        loadgen_image = build_loadgen_image(scratch)
-        deployment.create(hotel_image, loadgen_image, artifacts)
-        closed = run_phase(deployment, loadgen_image, "closed", artifacts, seeds["closed"])
-        report_pod_usage(deployment, artifacts, "closed")
-        throughput = closed["operations_per_second"]
-        # p99 is measured at a fixed fraction of this sample's own closed-loop
-        # throughput, so a faster candidate is held to proportionally more load.
-        offered = OPEN_LOOP_LOAD_FRACTION * throughput
-        open_loop = run_phase(deployment, loadgen_image, "open", artifacts, seeds["open"], rate=offered)
-        report_pod_usage(deployment, artifacts, "open")
-        p99 = open_loop["latency_ms.p99"]
-        log(f"closed loop: {throughput:.1f} ops/s; open loop at {offered:.1f} ops/s "
-            f"({OPEN_LOOP_LOAD_FRACTION:.0%}): p99 {p99:.2f} ms")
-        if artifacts:
-            (artifacts / "offered-rate.json").write_text(json.dumps({
-                "closed_loop_operations_per_second": throughput,
-                "open_loop_load_fraction": OPEN_LOOP_LOAD_FRACTION,
-                "open_loop_offered_operations_per_second": offered,
-            }) + "\n")
-        write_stream(output, [HELLO, {
-            "kind": "result", "label": "",
-            "values": {"operations_per_second": throughput, "latency_ms.p99": p99},
-        }])
-        return 0
-    except (JobError, subprocess.TimeoutExpired, KeyError, json.JSONDecodeError) as error:
-        message = str(error) or type(error).__name__
-        log(f"benchmark failed: {message}")
-        write_stream(output, [HELLO, {"kind": "error", "message": message[:2000]}])
-        return 1
+    log(f"seeded dataset {digest[:16]} in {time.monotonic() - started:.0f}s:\n" + logs.strip()[-1500:])
 
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("check", "benchmark"):
-        p = sub.add_parser(name)
-        p.add_argument("--project-root", type=Path, required=True)
-        if name == "benchmark":
-            p.add_argument("--vs-output", type=Path, required=True)
+    sub.add_parser("check").add_argument("--project-root", type=Path, required=True)
     sub.add_parser("sweep")
     args = parser.parse_args(argv)
 
@@ -709,9 +507,7 @@ def main(argv: list[str]) -> int:
             return 0
         require_env("VIBESYS_K8S_REGISTRY")
         require_env("VIBESYS_K8S_BUILDER")
-        if args.command == "check":
-            return do_check(args.project_root.resolve(), scratch)
-        return do_benchmark(args.project_root.resolve(), scratch, args.vs_output)
+        return do_check(args.project_root.resolve())
     except JobError as error:
         log(f"failed: {error}")
         return 1

@@ -7,53 +7,62 @@ is a candidate input: the CLI versions these files as the task.
 | Path | What |
 | --- | --- |
 | `vibesys.input.toml`, `objectives.toml` | Manifest and the two Pareto objectives. |
-| `Dockerfile` | Job image: kubectl 1.34, buildctl, Go, Python 3, and `loadgen`, `seed`, `hotel-correctness` and `podctl` built from `evaluator/` against a clone of the vibesys repository at commit `de037943cb6a8e6e73d00e8bc19fa53570558583` (the generic servicebench engine). Base images are pinned by digest; the build downloads the module's dependencies (mongo-driver) from the Go proxy. |
-| `run.py` | Trusted wrapper: `check`, `benchmark`, `sweep`. `tests/test_run.py` tests its manifests and seeds (`python3 -m unittest discover -s tests`). |
-| `k8s/manifest.yaml` | The application: 19 Deployments, 19 Services, 8 ConfigMaps. |
-| `evaluator/` | One Go module holding all Hotel knowledge; it imports only vibesys's generic engine packages, and its `go.mod` replaces them by the Dockerfile's clone at `/src`. `internal/dataset` generates the task's data from `dataset.Seed` (see Dataset below). `cmd/seed` (`internal/seed`) writes it into MongoDB. `internal/appsupport/hotel` holds `Reference`, the pinned application's read answers over the dataset (including an operation-for-operation copy of go-geoindex's approximate nearest search, pinned against the real library by `testdata/geoindex_golden.json`), plus topology and preflight probes. `cmd/loadgen` is servicebench (same flags) with the task's Hotel adapter `internal/apps/hotel` (request distributions, expected answers). `cmd/hotel-correctness` and `internal/accuracyapps/hotel` are the semantic oracle, first copied from `examples/microservices/hotel-correctness/.vibesys/tasks/compose/evaluator` at the vibesys commit above. `cmd/podctl` (`internal/podctl`) restarts and waits for pods through the Kubernetes API from inside the namespace. |
-| `workload/closed.toml` | Closed loop, concurrency 32, the canonical mixed workload; also the oracle's workload (with `strict_linearizable_capacity`). Objective `operations_per_second`. |
-| `workload/open.toml` | The same mix, open loop at a fixed offered rate; objective `latency_ms.p99`. |
+| `Dockerfile` | Task image (every job and every in-cluster pod of the task runs it): vibesys-evaluator (Python package, `loadgen`, kubectl 1.34, buildctl) built from vibesys commit `e7da9610dfce08c7261895df9b01bfadb3f46314` until the image is published, pymongo, and `hotel-correctness` and `podctl` built from `evaluator/` against a clone of vibesys at `de037943cb6a8e6e73d00e8bc19fa53570558583` (the servicebench accuracy framework). Base images are pinned by digest. |
+| `dataset.py` | The single owner of the data: generates it from `SEED` (see Dataset), the MongoDB documents, the values writes put in, and the reference answers of the read paths (an operation-for-operation copy of go-geoindex's approximate nearest search). |
+| `bench.py` | The benchmark, on vibesys-evaluator: system under test, seed, workload (operations, distributions, checks), `benchmark(run)` and the validity rules. |
+| `run.py` | Trusted wrapper of the accuracy check: `check`, `sweep`. |
+| `tests/` | `python -m unittest discover -s tests` (needs vibesys-evaluator and pymongo): `test_dataset.py` pins the documents' digest to the earlier Go seed's and the reference to the real go-geoindex's answers; `test_run.py` tests run.py's Jobs and the manifest. |
+| `k8s/manifest.yaml` | The application: 19 Deployments (the data tier labelled `tier: data`), 19 Services, 8 ConfigMaps. |
+| `evaluator/` | Go module of the accuracy check. `internal/dataset` reads dataset.py's dataset file (`--dataset` or `$HOTEL_DATASET`) and draws the oracle's own write values (`additions.go`, `vocabulary.go`). `internal/appsupport/hotel` holds `Reference`, the pinned application's read answers over the dataset (pinned against the real library by `testdata/geoindex_golden.json`, which `tests/test_dataset.py` also reads), plus topology and preflight probes. `cmd/hotel-correctness` and `internal/accuracyapps/hotel` are the semantic oracle. `cmd/podctl` (`internal/podctl`) restarts and waits for pods through the Kubernetes API from inside the namespace. Its tests need the dataset file: `python dataset.py /tmp/dataset.json; HOTEL_DATASET=/tmp/dataset.json go test ./...` (without it they skip). |
+| `workload/oracle.toml` | The oracle's workload: targets, timeout, `strict_linearizable_capacity`. |
 
-## What a job does
+## What the benchmark does (bench.py, one sample)
 
-1. Builds `hotelReservation/` with `buildctl` against `$VIBESYS_K8S_BUILDER` and pushes
-   `$VIBESYS_K8S_REGISTRY/hotel-k8s/hotel:<tree hash>`; builds and pushes the evaluator image
-   (busybox + `loadgen` + `seed` + `hotel-correctness` + `podctl` + `workload/`).
+vibesys-evaluator deploys `SYSTEM` (builds `hotelReservation/` and the task image in-cluster,
+fresh namespace, the `tier=data` Deployments, the seed Job running `seed`, the eight application
+Deployments with two replicas each, readiness probes through `frontend:5000`), then runs
+`benchmark(run)`: two closed-loop phases (32 clients, 15 s warmup, 60 s; throughput = their
+median) and three open-loop phases at 0.7 x that throughput (uniform arrivals, 10 s warmup,
+60 s; p99 = their median). Each phase is a pod of the task image: it generates the phase's
+requests from the dataset and the sample's seed into a file, runs loadgen over it, then checks
+every write and 10% of the reads (the validation sample) after the window. A sample fails on any
+loadgen error or failed check in a window, an operation of the mix that never completed, or an
+open loop below 95% of its rate. The sample seed is drawn per sample and recorded
+(`seeds.json`; `bench.py benchmark --seed N` replays one). Writes carry from phase to phase
+(each phase replays the earlier phases' writes into its model), so nothing is reset.
+
+## What the check does (run.py)
+
+1. Builds `hotelReservation/` and the task image with `buildctl` against `$VIBESYS_K8S_BUILDER`
+   and pushes them to `$VIBESYS_K8S_REGISTRY/hotel-k8s/{hotel,task}:<tree hash>`.
 2. Creates namespace `hk8s-<random>` and applies `k8s/manifest.yaml` with `${NAMESPACE}` and
    `${HOTEL_IMAGE}` substituted, in two parts: first the data tier and configuration (ConfigMaps,
    Services, MongoDB, memcached, consul, jaeger), and the service account `evaluator` (a Role
    that may get/list/watch/delete pods and get/list Deployments of the namespace, nothing else;
    the application runs as the namespace's default account). Once the MongoDB Deployments are
-   Available it runs the Job `seed` (2 CPU, 1 GiB, at most 10 minutes), which writes the task's
-   dataset into the six databases (drop, insert, indexes, count check) and prints the dataset and
-   documents digests (`seed.log`, `seed.summary.json` in the artifacts). Only then it applies the
-   eight application Deployments (two replicas each) and waits for all Deployments to be Available
-   (with two replicas that needs both). The services find their collections non-empty and keep
-   them (see Base-application changes).
+   Available it runs the Job `seed` (`bench.py seed`, as a benchmark sample seeds: drop, insert,
+   indexes, count check; `seed.log`). Only then it applies the eight application Deployments
+   (two replicas each) and waits for all Deployments to be Available. The services find their
+   collections non-empty and keep them (see Base-application changes).
 3. Runs the Job `ready` (`podctl ready`, `ready.log`): every replica of every application
    Deployment Ready, every pod of the seven gRPC services registered in consul at its pod IP
    (`/v1/agent/services`), and every frontend pod answering `/user`, `/recommendations` and
    `/hotels` with 200 at its own IP.
-4. `check`: draws the oracle's seed with `secrets` (`seeds.json`) and runs the Job `oracle`
-   (`hotel-correctness --mode accuracy`, 2 CPU, 2 GiB, `oracle.log`) against
+4. Draws the oracle's seed with `secrets` (`seeds.json`) and runs the Job `oracle` (2 CPU,
+   2 GiB, `oracle.log`): `python dataset.py /tmp/dataset.json`, then
+   `hotel-correctness --mode accuracy --dataset /tmp/dataset.json` against
    `http://frontend:5000`. Every oracle request asks for its own connection (`Connection: close`),
-   so kube-proxy spreads the reads, the repeated reads of the visibility checks included, over
-   both frontend pods; internal gRPC round-robins over consul. Its restart hook
-   (`--restart-command-json`, see below) is `podctl ... restart`. Exit 0 is a pass.
-   `benchmark`: draws fresh seeds (below), runs two load-generator Jobs inside the namespace
-   against `http://frontend:5000`: `closed` (operations per second) then `open` (p99 latency at
-   70% of the closed loop's throughput). After each phase it logs every application pod's CPU
-   seconds and network bytes from the kubelet summary (`pod-usage-closed.json`,
-   `pod-usage-open.json`; cumulative), so the load on each replica is visible. One protocol-2
-   result carries both.
+   so kube-proxy spreads the reads over both frontend pods; internal gRPC round-robins over
+   consul. Its restart hook (`--restart-command-json`, see below) is `podctl ... restart`. Exit 0
+   is a pass.
 5. Deletes the namespace on every exit path the process can see: normal end, error, SIGTERM,
-   SIGINT and SIGHUP. The CLI ends a cancelled or timed-out job with SIGKILL (host: the process
-   group; docker: `docker rm --force`), which no handler can see, so the namespace leaks. Each
-   namespace therefore carries labels `vibesys.dev/hotel-k8s=1`, `vibesys.dev/hotel-k8s-created=<epoch>`
-   and `vibesys.dev/hotel-k8s-job=<job id>`, and every job first deletes the task's `hk8s-*`
-   namespaces older than the larger of the manifest's `accuracy` and `benchmark` `timeout_seconds`
-   plus 10 minutes: older than any live job can be, so concurrent jobs are never touched.
-   `run.py sweep` runs only that sweep.
+   SIGINT and SIGHUP. The CLI ends a cancelled or timed-out job with SIGKILL, which no handler
+   can see, so the namespace leaks. Each namespace therefore carries labels
+   `vibesys.dev/hotel-k8s=1`, `vibesys.dev/hotel-k8s-created=<epoch>` and
+   `vibesys.dev/hotel-k8s-job=<job id>`, and every check first deletes the task's `hk8s-*`
+   namespaces older than the larger of the manifest's `timeout_seconds` plus 10 minutes.
+   `run.py sweep` runs only that sweep. (The benchmark's namespaces are vibesys-evaluator's,
+   which sweeps its own the same way.)
 
 ## Restart hooks
 
@@ -77,28 +86,11 @@ the deleted and the serving pods.
 Without the flag the checks fall back to the engine's `--run-command-json`/`--stop-command-json`
 crash and start (`check_test.go` runs both ways).
 
-## Seeds
-
-Every benchmark sample draws, with `secrets`, a workload seed per phase and the closed phase's
-fixture seed F, below 2^62; the open phase's fixture seed is F + 1. They go to the loadgen Jobs as
-`--seed`/`--fixture-seed` and into `seeds.json`; `loadgen --seed S --fixture-seed F` with the
-phase's workload replays a phase. The `seed`/`fixture_seed` in `workload/*.toml` are for local
-development only. The check records the oracle's `--seed` in its `seeds.json`.
-
-Both phases run in one namespace and reservations cannot be deleted, so their fixtures must be
-disjoint. `TrialSlot` (`internal/apps/hotel/application.go`) places them without a hash: the run's
-fixture seed (the engine passes trial fixture seed = F + trial index) selects run slot F mod 303,
-the trial index (at most 16 trials per run) the slot within it; 303 x 16 slots fit the 4850
-blocks of 512 nights in years 3000-9799. The slot gives the trial's reservation block, its
-additions' sandbox cell (slot x 6, of about 31,000 cells) and the high bits of its added hotels'
-ID tag. Fixture seeds F and F + 1 therefore never share a night, a cell or an ID, by construction;
-`fixtures_test.go` checks it for random F and every trial of both phases.
-
 ## Dataset
 
-`evaluator/internal/dataset` generates everything the databases hold, as a pure function of
-`dataset.Seed` (fixed per task version; changing it changes the task). The package doc records
-the choices; in short:
+`dataset.py` generates everything the databases hold, as a pure function of `SEED` (fixed per
+task version; changing it changes the task). It equals the task's earlier Go generator draw for
+draw: the MongoDB documents' digest is `7670033f...` for both (`tests/test_dataset.py`).
 
 | Collection | Documents | BSON |
 | --- | --- | --- |
@@ -117,51 +109,40 @@ the choices; in short:
   (the profile service refuses to truncate float64).
 - 1-5 rate plans per hotel (mean 2.66): `RACK` over the whole 2027 rate window, other plans over
   14-180 days of it; prices by city, star class and plan; tax-inclusive rates.
-- Recommendation attributes: rating 1 + 4 Beta(5, 2) at 0.01 (one hotel has the top rating),
-  price = the cheapest plan (one hotel is the cheapest); capacities 10-800 rooms by star class;
-  a popularity rank per hotel within its city.
+- Recommendation attributes: rating 1 + 4 Beta(5, 2) at 0.01, price = the cheapest plan;
+  capacities 10-800 rooms by star class; a popularity rank per hotel within its city.
 - 10,000 users with unique names and random 10-16 character passwords (stored as SHA-256).
 - Indexes on the services' query keys (`id`, `hotelId`, hotel+night, `username`).
-- Digests: dataset `7fcac12b...` (`internal/dataset`), documents `7670033f...`
-  (`internal/seed`); both are pinned by tests and printed by the seed Job.
 
-Canonical requests (`internal/apps/hotel/operations.go`) are deterministic functions of each
-sample's random word: locations by city popularity (Zipf, s = 1) with the hotels' spread around
-the centre (5 decimals), stays of 1-7 nights skewed short over the rate window, logins and
-reservation users by Zipf (s = 0.75) over the users, reservations by hotel popularity on
-trial-owned far-future nights. Over 100,000 samples an exact-request cache hits 0.45% of the mix.
+Requests (`bench.py`) draw from the operation's own stream: locations by city popularity
+(Zipf, s = 1) with the hotels' spread around the centre (5 decimals; a search redraws where
+geo's own ranking ties), stays of 1-7 nights skewed short over the rate window, logins and
+reservation users by Zipf (s = 0.75) over the users, rates, reservations and writes by hotel
+popularity; reservations on far-future nights of a block the sample draws, at most 128 distinct
+hotels a night, serialized (`exclusive`: the service's capacity check is not transactional).
 
 ## Writes in the workload
 
-About 1% of the mix (104 of 10,504 weight) are owner writes (`internal/apps/hotel/writes.go`),
-plus `hotel_rates` reads of `GET /rates` (4%) that make rate writes visible:
+About 1% of the mix (104 of 10,504 weight) are owner writes, plus `hotel_rates` reads of
+`GET /rates` (4%) that make rate writes visible:
 
 | Operation | Weight | Target and value |
 | --- | --- | --- |
 | `update_rate` | 42 | a hotel by popularity, one of its plans; prices x0.8-1.25 of the seeded ones |
 | `update_profile` | 42 | a hotel by popularity; a new phone, and in 10% of the updates a new name |
 | `set_capacity` | 12 | a capacity-managed hotel (one in four, never booked by `reserve_capacity`); rooms between C/2 and 2C, then a reservation of rooms+1 that must be refused |
-| `add_hotel` | 8 | a hotel in the trial's sandbox (below) |
+| `add_hotel` | 8 | a hotel in the sample's sandbox cell (below) |
 
-Validation stays exact with an acceptance window (`history.go`): for each item the adapter
-keeps every write with the time its plan was built and the time its response was validated.
-A read whose plan was built at `start` and validated at `end` may show the latest value
-acknowledged more than 1 s before `start` (the seeded value if none), or any later write
-whose plan was built before `end`. A write that failed counts as possibly applied. Writes of
-one item are serialized (a plan that draws a busy item draws again), so "the latest" is well
-defined.
-
-Sandboxes keep additions from changing seeded answers: about 31,000 cells of 25 km in the
-South Pacific (lat -58..-20, lon -165..-85), more than 1,000 km from every seeded hotel. Each
-trial owns a cell and an ID tag (both from its trial slot, see Seeds; IDs `a<hex>-<n>`, never
-numeric, so never a seeded ID) and adds hotels within 2 km of the cell's centre. Once it holds a visible addition, 3% of the trial's searches and distance
-recommendations query the sandbox; the answer must equal the reference answer for the
-acknowledged additions plus any subset of the ones still in their window.
-
-The closed and open phases are separate load-generator processes in one namespace, so each
-trial's `Reset` restores what it changed (prices, profiles and capacities back to the seeded
-values, through the same routes); additions stay in their sandbox, which the next process's
-trials do not reuse.
+Checks stay exact with `Versions` (the 1 s bound of OBJECTIVE.md): a read over [start, end]
+may show, per item, the latest value acknowledged more than 1 s before it started (the seeded
+value if none) or any value whose write started before it ended; a failed write counts as
+possibly applied. Writes of one item never overlap (`exclusive`), so its versions are in
+application order. Sandboxes keep additions from changing seeded answers: about 31,000 cells
+of 25 km in the South Pacific, more than 1,000 km from every seeded hotel; a sample adds its
+hotels within 2 km of one cell's centre (IDs `a<hex>-<n>`), and 3% of the searches and
+distance recommendations of later phases query near an addition acknowledged earlier; the
+answer must equal the reference answer for the visible additions plus any subset of the ones
+still in their window.
 
 ## Write checks in the oracle
 
@@ -232,15 +213,15 @@ the source of truth (reservation counts now included, above).
 | `KUBECONFIG` | Kubeconfig of the cluster; its server address must be reachable from the job's network namespace (host networking). |
 | `VIBESYS_K8S_REGISTRY` | Registry as both BuildKit and the cluster's nodes pull it, for example `localhost:5001` (plain http). |
 | `VIBESYS_K8S_BUILDER` | BuildKit address, for example `tcp://127.0.0.1:1234`. |
-| `VIBESYS_ARTIFACTS_DIR` | Optional. Phase logs, summaries and streams of a benchmark are copied there. |
+| `VIBESYS_ARTIFACTS_DIR` | Optional. Logs, phase results and the dataset file are kept there. |
 
 ## Resource limits
 
 Requests equal limits on every container (Guaranteed QoS). Application pods: 16 (8 services x 2),
 1 CPU, 2 GiB each. MongoDB: 2 CPU, 2 GiB each. memcached: 1 CPU, 1 GiB each. consul: 1 CPU,
-512 MiB. jaeger: 2 CPU, 1 GiB. The namespace's deployments request 34 CPUs and 48.5 GiB. Jobs:
-seed 2 CPU (before the application starts), ready 0.5 CPU, oracle 2 CPU, load generator 6 CPU,
-4 GiB. Peak demand is 40 CPUs (benchmark) or 36 (check), on a 64-CPU node shared with other
+512 MiB. jaeger: 2 CPU, 1 GiB. The namespace's deployments request 34 CPUs and 48.5 GiB. Pods
+of the jobs: seed 4 CPU (before the application starts), ready/probe 0.5 CPU, oracle 2 CPU,
+phase (loadgen) 6 CPU, 4 GiB. Peak demand is 40 CPUs (benchmark) or 36 (check), on a 64-CPU node shared with other
 tasks' jobs, so two of these jobs cannot run at once.
 
 ## Manifest provenance
@@ -253,8 +234,3 @@ these further edits: images pinned by tag and digest (consul 1.15.4, jaeger 1.57
 memcached 1.6.7, mongo 5.0), the application image is `${HOTEL_IMAGE}`, two replicas of each application Deployment, resources as above,
 `terminationGracePeriodSeconds: 5`, and `GOMAXPROCS` of each application container from the downward API (`limits.cpu`). Without it the base measured about 345 operations/s with 100 ms latency steps (CFS throttling: Go 1.21 sees every core of the node), with it about 925. Service configs keep stock values
 (`GC=100`, `JAEGER_SAMPLE_RATIO=0.01`).
-
-## Not in the manifest yet
-
-`vibesys.input.toml` should declare that the jobs need the `kubernetes` resource
-(`[environment] needs = ["kubernetes"]`) once the CLI accepts it; today's CLI refuses the key.

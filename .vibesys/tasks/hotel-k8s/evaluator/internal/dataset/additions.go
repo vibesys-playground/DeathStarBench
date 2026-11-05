@@ -1,8 +1,11 @@
 package dataset
 
 import (
+	"fmt"
 	"math"
 	"strconv"
+	"strings"
+	"time"
 )
 
 // Values that writes put into the application: the workload and the oracle
@@ -38,11 +41,16 @@ func AddedHotel(id string, random uint64, lat, lon float64) Hotel {
 	return hotel
 }
 
+// templateOf is what writes draw a seeded hotel's new phone and name from:
+// its city in the dataset file; additionCity for an added hotel.
 func templateOf(hotel *Hotel) *cityTemplate {
-	if hotel.City < 0 || hotel.City >= len(cityTable) {
+	data := Default()
+	if hotel.City < 0 || hotel.City >= len(data.Cities) {
 		return &additionCity
 	}
-	return &cityTable[hotel.City]
+	city := &data.Cities[hotel.City]
+	return &cityTemplate{name: city.Name, region: city.Region, country: city.Country,
+		lat: city.Lat, lon: city.Lon, phone: city.PhoneFormat, districts: city.Districts}
 }
 
 func trimThe(district string) string {
@@ -111,4 +119,97 @@ func SandboxPoint(index uint64, random uint64) (lat, lon float64) {
 // seeded IDs (1..HotelCount).
 func AddedHotelID(tag uint64, n int) string {
 	return "a" + strconv.FormatUint(tag, 16) + "-" + strconv.Itoa(n)
+}
+
+var (
+	starWeights = []int{8, 20, 35, 25, 12}
+	starPrice   = []float64{0.45, 0.65, 1.0, 1.6, 2.8}
+	starRooms   = [][2]int{{10, 60}, {30, 150}, {60, 300}, {100, 450}, {150, 800}}
+	planWeights = []int{20, 30, 25, 15, 10}
+	minPlanDays = 14
+	maxPlanDays = 180
+)
+
+// describeHotel draws everything of a hotel after its location from the
+// template's city: name, phone, address, description, rating, capacity and
+// rate plans.
+func describeHotel(r *rng, hotel *Hotel, template *cityTemplate) {
+	stars := hotel.Stars
+	district := template.districts[r.intn(len(template.districts))]
+	bare := strings.TrimPrefix(district, "the ")
+	prefix := namePrefixes[r.intn(len(namePrefixes))]
+	suffix := nameSuffixes[r.intn(len(nameSuffixes))]
+	switch r.pick([]int{40, 35, 25}) {
+	case 0:
+		hotel.Name = prefix + " " + suffix
+	case 1:
+		hotel.Name = prefix + " " + bare + " " + suffix
+	default:
+		hotel.Name = "Hotel " + prefix + " " + template.name
+	}
+	hotel.Phone = fill(r, template.phone)
+	hotel.Address = Address{
+		StreetNumber: strconv.Itoa(1 + r.intn(400)),
+		StreetName:   template.streets[r.intn(len(template.streets))],
+		City:         template.name, State: template.region, Country: template.country,
+		PostalCode: fill(r, template.postal),
+	}
+	adjectives := starAdjectives[stars-1]
+	first := r.intn(len(amenities))
+	second := (first + 1 + r.intn(len(amenities)-1)) % len(amenities)
+	other := template.districts[r.intn(len(template.districts))]
+	hotel.Description = fmt.Sprintf(
+		"A %d-minute walk from %s, this %s %s in %s is %d minutes from %s and offers %s and %s.",
+		2+r.intn(14), transit[r.intn(len(transit))], adjectives[r.intn(len(adjectives))],
+		kinds[r.intn(len(kinds))], district, 5+r.intn(26), other, amenities[first], amenities[second],
+	)
+
+	// 1 + 4 Beta(5, 2): the fifth smallest of six uniforms is Beta(5, 2).
+	var uniforms [6]float64
+	for n := range uniforms {
+		uniforms[n] = r.float()
+	}
+	sortFloats(uniforms[:])
+	hotel.Rating = round(1+4*uniforms[4], 100)
+
+	rooms := starRooms[stars-1]
+	hotel.Capacity = rooms[0] + int(float64(rooms[1]-rooms[0])*(r.float()+r.float())/2)
+
+	base := template.basePrice * starPrice[stars-1] * (0.75 + 0.25*(r.float()+r.float()))
+	plans := 1 + r.pick(planWeights)
+	codes := make([]int, len(ratePlanCodes)-1)
+	for n := range codes {
+		codes[n] = n + 1
+	}
+	hotel.Price = math.MaxFloat64
+	for n := 0; n < plans; n++ {
+		code, start, days := 0, 0, RateWindowDays
+		if n > 0 {
+			pick := n - 1 + r.intn(len(codes)-(n-1))
+			codes[n-1], codes[pick] = codes[pick], codes[n-1]
+			code = codes[n-1]
+			days = minPlanDays + r.intn(maxPlanDays-minPlanDays+1)
+			start = r.intn(RateWindowDays - days + 1)
+		}
+		room := roomTypes[r.intn(len(roomTypes))]
+		total := round(base*ratePlanCodes[code].factor*room.factor, 100)
+		hotel.RatePlans = append(hotel.RatePlans, RatePlan{
+			Code:            ratePlanCodes[code].code,
+			InDate:          RateWindowStart.AddDate(0, 0, start).Format(time.DateOnly),
+			OutDate:         RateWindowStart.AddDate(0, 0, start+days).Format(time.DateOnly),
+			RoomCode:        room.code,
+			RoomDescription: room.description,
+			BookableRate:    total, TotalRate: total,
+			TotalRateInclusive: round(total*(1+template.tax), 100),
+		})
+		hotel.Price = math.Min(hotel.Price, total)
+	}
+}
+
+func sortFloats(values []float64) {
+	for i := 1; i < len(values); i++ {
+		for j := i; j > 0 && values[j] < values[j-1]; j-- {
+			values[j], values[j-1] = values[j-1], values[j]
+		}
+	}
 }

@@ -1,6 +1,6 @@
-// Package hotel owns topology, seeded-data, and preflight contracts shared by
-// the independent Hotel benchmark and accuracy adapters. Reference answers the
-// read paths of the pinned application over the task's generated dataset.
+// Package hotel owns the topology, seeded-data and preflight contracts of the
+// Hotel accuracy adapter. Reference answers the read paths of the pinned
+// application over the task's dataset (dataset.py's file).
 package hotel
 
 import (
