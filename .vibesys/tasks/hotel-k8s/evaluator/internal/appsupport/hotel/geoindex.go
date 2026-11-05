@@ -136,12 +136,32 @@ func geoDistance(p1, p2 geoPoint) float64 {
 }
 
 // geoLonLength is lonDegreeDistance.get: the length of one degree of
-// longitude at the latitude truncated to a tenth of a degree.
+// longitude at the latitude truncated to a tenth of a degree. Like the
+// library's own cache, it computes each tenth once (geoLonLengths).
 func geoLonLength(lat float64) float64 {
 	latIndex := int(lat * 10)
+	if offset := latIndex + geoLonLengthOffset; offset >= 0 && offset < len(geoLonLengths) {
+		return geoLonLengths[offset]
+	}
+	return geoLonLengthAt(latIndex)
+}
+
+func geoLonLengthAt(latIndex int) float64 {
 	latRounded := float64(latIndex) / 10
 	return geoDistance(geoPoint{lat: latRounded, lon: 0.0}, geoPoint{lat: latRounded, lon: 1.0})
 }
+
+// geoLonLengths[i] is geoLonLengthAt(i - geoLonLengthOffset), for every tenth
+// of a degree of latitude.
+const geoLonLengthOffset = 900
+
+var geoLonLengths = func() []float64 {
+	lengths := make([]float64, 2*geoLonLengthOffset+1)
+	for offset := range lengths {
+		lengths[offset] = geoLonLengthAt(offset - geoLonLengthOffset)
+	}
+	return lengths
+}()
 
 func geoApproximateSquareDistance(p1, p2 geoPoint) float64 {
 	avgLat := (p1.lat + p2.lat) / 2.0
