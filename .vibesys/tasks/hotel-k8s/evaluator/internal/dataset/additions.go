@@ -12,19 +12,40 @@ import (
 // change profiles and prices of seeded hotels and add new hotels through the
 // frontend's admin routes. Seeded data (Generate) does not depend on them.
 
+// Source is a stream of random draws that write values are drawn from: the oracle's own
+// SplitMix64 streams, or a request generator's (the vibesys-evaluator SDK's workload.Rand, whose
+// Below and Random are the same draws as dataset.py's Rand).
+type Source interface {
+	// Below is one draw modulo n.
+	Below(n int) int
+	// Random is a uniform float in [0, 1) from the top 53 bits of one draw.
+	Random() float64
+}
+
 // NewPhone draws a phone number in the format of the hotel's city.
 func NewPhone(hotel *Hotel, random uint64) string {
-	return fill(&rng{state: random}, templateOf(hotel).phone)
+	return NewPhoneFrom(Default(), hotel, &rng{state: random})
+}
+
+// NewPhoneFrom is dataset.py's new_phone: a phone number in the format of the hotel's city
+// in data (the additions' city for an added hotel), drawn from r.
+func NewPhoneFrom(data *Dataset, hotel *Hotel, r Source) string {
+	return fill(r, templateOf(data, hotel).phone)
 }
 
 // NewName draws a hotel name as the generator does for the hotel's city.
 func NewName(hotel *Hotel, random uint64) string {
-	r := &rng{state: random}
-	template := templateOf(hotel)
-	prefix := namePrefixes[r.intn(len(namePrefixes))]
-	suffix := nameSuffixes[r.intn(len(nameSuffixes))]
-	district := template.districts[r.intn(len(template.districts))]
-	if r.intn(2) == 0 {
+	return NewNameFrom(Default(), hotel, &rng{state: random})
+}
+
+// NewNameFrom is dataset.py's new_name: a hotel name as the generator draws them for the
+// hotel's city in data, drawn from r.
+func NewNameFrom(data *Dataset, hotel *Hotel, r Source) string {
+	template := templateOf(data, hotel)
+	prefix := namePrefixes[r.Below(len(namePrefixes))]
+	suffix := nameSuffixes[r.Below(len(nameSuffixes))]
+	district := template.districts[r.Below(len(template.districts))]
+	if r.Below(2) == 0 {
 		return prefix + " " + suffix
 	}
 	return prefix + " " + trimThe(district) + " " + suffix
@@ -35,16 +56,19 @@ func NewName(hotel *Hotel, random uint64) string {
 // capacity and 1-5 rate plans over the rate window, as Generate draws them.
 // Its City is -1 and its Popularity 0.
 func AddedHotel(id string, random uint64, lat, lon float64) Hotel {
-	r := &rng{state: Mix(random, 0)}
-	hotel := Hotel{ID: id, City: -1, Stars: 1 + r.pick(starWeights), Lat: lat, Lon: lon}
+	return AddedHotelFrom(id, &rng{state: Mix(random, 0)}, lat, lon)
+}
+
+// AddedHotelFrom is AddedHotel drawn from r: dataset.py's added_hotel.
+func AddedHotelFrom(id string, r Source, lat, lon float64) Hotel {
+	hotel := Hotel{ID: id, City: -1, Stars: 1 + pick(r, starWeights), Lat: lat, Lon: lon}
 	describeHotel(r, &hotel, &additionCity)
 	return hotel
 }
 
 // templateOf is what writes draw a seeded hotel's new phone and name from:
 // its city in the dataset file; additionCity for an added hotel.
-func templateOf(hotel *Hotel) *cityTemplate {
-	data := Default()
+func templateOf(data *Dataset, hotel *Hotel) *cityTemplate {
 	if hotel.City < 0 || hotel.City >= len(data.Cities) {
 		return &additionCity
 	}
@@ -114,6 +138,14 @@ func SandboxPoint(index uint64, random uint64) (lat, lon float64) {
 	return round(centreLat+dy/kmPerDegreeLat, 1e6), round(centreLon+dx/kmPerDegreeLon, 1e6)
 }
 
+// SandboxPointFrom is SandboxPoint drawn from r: dataset.py's sandbox_point.
+func SandboxPointFrom(index uint64, r Source) (lat, lon float64) {
+	centreLat, centreLon, kmPerDegreeLon := Sandbox(index)
+	dy := (2*r.Random() - 1) * SandboxRadiusKm / math.Sqrt2
+	dx := (2*r.Random() - 1) * SandboxRadiusKm / math.Sqrt2
+	return round(centreLat+dy/kmPerDegreeLat, 1e6), round(centreLon+dx/kmPerDegreeLon, 1e6)
+}
+
 // AddedHotelID is the ID of the n-th hotel a run adds; tag identifies the
 // run (hexadecimal), so runs never collide with each other or with the
 // seeded IDs (1..HotelCount).
@@ -133,13 +165,13 @@ var (
 // describeHotel draws everything of a hotel after its location from the
 // template's city: name, phone, address, description, rating, capacity and
 // rate plans.
-func describeHotel(r *rng, hotel *Hotel, template *cityTemplate) {
+func describeHotel(r Source, hotel *Hotel, template *cityTemplate) {
 	stars := hotel.Stars
-	district := template.districts[r.intn(len(template.districts))]
+	district := template.districts[r.Below(len(template.districts))]
 	bare := strings.TrimPrefix(district, "the ")
-	prefix := namePrefixes[r.intn(len(namePrefixes))]
-	suffix := nameSuffixes[r.intn(len(nameSuffixes))]
-	switch r.pick([]int{40, 35, 25}) {
+	prefix := namePrefixes[r.Below(len(namePrefixes))]
+	suffix := nameSuffixes[r.Below(len(nameSuffixes))]
+	switch pick(r, []int{40, 35, 25}) {
 	case 0:
 		hotel.Name = prefix + " " + suffix
 	case 1:
@@ -149,34 +181,34 @@ func describeHotel(r *rng, hotel *Hotel, template *cityTemplate) {
 	}
 	hotel.Phone = fill(r, template.phone)
 	hotel.Address = Address{
-		StreetNumber: strconv.Itoa(1 + r.intn(400)),
-		StreetName:   template.streets[r.intn(len(template.streets))],
+		StreetNumber: strconv.Itoa(1 + r.Below(400)),
+		StreetName:   template.streets[r.Below(len(template.streets))],
 		City:         template.name, State: template.region, Country: template.country,
 		PostalCode: fill(r, template.postal),
 	}
 	adjectives := starAdjectives[stars-1]
-	first := r.intn(len(amenities))
-	second := (first + 1 + r.intn(len(amenities)-1)) % len(amenities)
-	other := template.districts[r.intn(len(template.districts))]
+	first := r.Below(len(amenities))
+	second := (first + 1 + r.Below(len(amenities)-1)) % len(amenities)
+	other := template.districts[r.Below(len(template.districts))]
 	hotel.Description = fmt.Sprintf(
 		"A %d-minute walk from %s, this %s %s in %s is %d minutes from %s and offers %s and %s.",
-		2+r.intn(14), transit[r.intn(len(transit))], adjectives[r.intn(len(adjectives))],
-		kinds[r.intn(len(kinds))], district, 5+r.intn(26), other, amenities[first], amenities[second],
+		2+r.Below(14), transit[r.Below(len(transit))], adjectives[r.Below(len(adjectives))],
+		kinds[r.Below(len(kinds))], district, 5+r.Below(26), other, amenities[first], amenities[second],
 	)
 
 	// 1 + 4 Beta(5, 2): the fifth smallest of six uniforms is Beta(5, 2).
 	var uniforms [6]float64
 	for n := range uniforms {
-		uniforms[n] = r.float()
+		uniforms[n] = r.Random()
 	}
 	sortFloats(uniforms[:])
 	hotel.Rating = round(1+4*uniforms[4], 100)
 
 	rooms := starRooms[stars-1]
-	hotel.Capacity = rooms[0] + int(float64(rooms[1]-rooms[0])*(r.float()+r.float())/2)
+	hotel.Capacity = rooms[0] + int(float64(rooms[1]-rooms[0])*(r.Random()+r.Random())/2)
 
-	base := template.basePrice * starPrice[stars-1] * (0.75 + 0.25*(r.float()+r.float()))
-	plans := 1 + r.pick(planWeights)
+	base := template.basePrice * starPrice[stars-1] * (0.75 + 0.25*(r.Random()+r.Random()))
+	plans := 1 + pick(r, planWeights)
 	codes := make([]int, len(ratePlanCodes)-1)
 	for n := range codes {
 		codes[n] = n + 1
@@ -185,13 +217,13 @@ func describeHotel(r *rng, hotel *Hotel, template *cityTemplate) {
 	for n := 0; n < plans; n++ {
 		code, start, days := 0, 0, RateWindowDays
 		if n > 0 {
-			pick := n - 1 + r.intn(len(codes)-(n-1))
+			pick := n - 1 + r.Below(len(codes)-(n-1))
 			codes[n-1], codes[pick] = codes[pick], codes[n-1]
 			code = codes[n-1]
-			days = minPlanDays + r.intn(maxPlanDays-minPlanDays+1)
-			start = r.intn(RateWindowDays - days + 1)
+			days = minPlanDays + r.Below(maxPlanDays-minPlanDays+1)
+			start = r.Below(RateWindowDays - days + 1)
 		}
-		room := roomTypes[r.intn(len(roomTypes))]
+		room := roomTypes[r.Below(len(roomTypes))]
 		total := round(base*ratePlanCodes[code].factor*room.factor, 100)
 		hotel.RatePlans = append(hotel.RatePlans, RatePlan{
 			Code:            ratePlanCodes[code].code,
