@@ -5,8 +5,8 @@ application = "hotel"
 [load]
 model = "closed_loop"
 rate = 0
-duration_seconds = 20
-warmup_seconds = 10
+duration_seconds = 60
+warmup_seconds = 15
 concurrency = 32
 timeout_seconds = 10
 repetitions = 2
