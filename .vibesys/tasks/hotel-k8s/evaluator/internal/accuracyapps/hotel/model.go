@@ -20,11 +20,11 @@ type hotelState struct {
 // pinned Hotel Reservation application. The generic accuracy framework owns
 // event scheduling and comparison; this type owns only Hotel semantics.
 type hotelOracle struct {
-	catalog   map[string]profile
+	catalog   catalog
 	reference *hotelsupport.Reference
 }
 
-func newHotelOracle(catalog map[string]profile) (*hotelOracle, error) {
+func newHotelOracle(catalog catalog) (*hotelOracle, error) {
 	return &hotelOracle{catalog: catalog, reference: hotelsupport.DefaultReference()}, nil
 }
 
@@ -72,7 +72,7 @@ type sequentialModel struct {
 	state  hotelState
 }
 
-func newSequentialModel(catalog map[string]profile) (*sequentialModel, error) {
+func newSequentialModel(catalog catalog) (*sequentialModel, error) {
 	oracle, err := newHotelOracle(catalog)
 	if err != nil {
 		return nil, err

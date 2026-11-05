@@ -84,11 +84,26 @@ func (s *State) Capacity(id string) (int, bool) {
 	if rooms, ok := s.capacity[id]; ok {
 		return rooms, true
 	}
-	hotel, ok := s.Hotel(id)
+	if rooms, err := s.ref.Capacity(id); err == nil {
+		return rooms, true
+	}
+	hotel, ok := s.added.Hotel(id)
 	if !ok {
 		return 0, false
 	}
 	return hotel.Capacity, true
+}
+
+// SeededMaxRooms is the most rooms the seeded bookings hold on one night of the hotel: the
+// application rejects a capacity below it.
+func (s *State) SeededMaxRooms(id string) int { return s.ref.SeededMaxRooms(id) }
+
+func (s *State) exists(id string) bool {
+	if _, ok := s.ref.Data.HotelIndex(id); ok {
+		return true
+	}
+	_, ok := s.added.Hotel(id)
+	return ok
 }
 
 // SetProfile applies a profile write; an empty field is unchanged.
@@ -122,7 +137,7 @@ func (s *State) SetPrices(id, code string, prices Prices) error {
 // acceptance: the application rejects a capacity below the rooms reserved
 // on any night.
 func (s *State) SetCapacity(id string, rooms int) error {
-	if _, ok := s.Hotel(id); !ok {
+	if !s.exists(id) {
 		return fmt.Errorf("unknown hotel %q", id)
 	}
 	s.capacity[id] = rooms
@@ -131,7 +146,7 @@ func (s *State) SetCapacity(id string, rooms int) error {
 
 // Add applies a hotel addition.
 func (s *State) Add(hotel dataset.Hotel) error {
-	if _, taken := s.Hotel(hotel.ID); taken {
+	if s.exists(hotel.ID) {
 		return fmt.Errorf("hotel %q exists", hotel.ID)
 	}
 	s.added.add(&hotel)

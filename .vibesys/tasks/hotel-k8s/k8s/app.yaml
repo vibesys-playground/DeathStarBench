@@ -1,5 +1,7 @@
 # The application tier of the reference (base) topology: eight Deployments of two pods,
-# 1 CPU and 2 GiB each (16 CPUs, 32 GiB), and the Services of the seven gRPC services.
+# 1 CPU each and 8 GiB in all (16 CPUs, 8 GiB: geo 2 x 1280 MiB and recommendation 2 x 1 GiB
+# hold the 1.5M hotels' locations, user and frontend 2 x 384 MiB, the others 2 x 256 MiB;
+# GOMEMLIMIT a little under each limit), and the Services of the seven gRPC services.
 # The candidate owns its own copy, hotelReservation/deploy/app.yaml (OBJECTIVE.md,
 # Resources); this one is used for a candidate that has none. Moved verbatim from
 # k8s/manifest.yaml, which keeps the data tier, the ConfigMaps and the frontend Service.
@@ -161,10 +163,10 @@ spec:
         resources:
           requests:
             cpu: "1"
-            memory: 2Gi
+            memory: 384Mi
           limits:
             cpu: "1"
-            memory: 2Gi
+            memory: 384Mi
         ports:
         - containerPort: 5000
         env:
@@ -175,6 +177,8 @@ spec:
                 divisor: "1"
           - name: GC
             value: "100"
+          - name: GOMEMLIMIT
+            value: "320MiB"
           - name: JAEGER_SAMPLE_RATIO
             value: "0.01"
           - name: LOG_LEVEL
@@ -242,10 +246,10 @@ spec:
         resources:
           requests:
             cpu: "1"
-            memory: 2Gi
+            memory: 1280Mi
           limits:
             cpu: "1"
-            memory: 2Gi
+            memory: 1280Mi
         ports:
         - containerPort: 8083
         env:
@@ -256,6 +260,8 @@ spec:
                 divisor: "1"
           - name: GC
             value: "100"
+          - name: GOMEMLIMIT
+            value: "1100MiB"
           - name: JAEGER_SAMPLE_RATIO
             value: "0.01"
           - name: LOG_LEVEL
@@ -323,10 +329,10 @@ spec:
         resources:
           requests:
             cpu: "1"
-            memory: 2Gi
+            memory: 256Mi
           limits:
             cpu: "1"
-            memory: 2Gi
+            memory: 256Mi
         ports:
         - containerPort: 8081
         env:
@@ -337,6 +343,8 @@ spec:
                 divisor: "1"
           - name: GC
             value: "100"
+          - name: GOMEMLIMIT
+            value: "200MiB"
           - name: JAEGER_SAMPLE_RATIO
             value: "0.01"
           - name: LOG_LEVEL
@@ -404,10 +412,10 @@ spec:
         resources:
           requests:
             cpu: "1"
-            memory: 2Gi
+            memory: 256Mi
           limits:
             cpu: "1"
-            memory: 2Gi
+            memory: 256Mi
         ports:
         - containerPort: 8084
         env:
@@ -418,6 +426,8 @@ spec:
                 divisor: "1"
           - name: GC
             value: "100"
+          - name: GOMEMLIMIT
+            value: "200MiB"
           - name: JAEGER_SAMPLE_RATIO
             value: "0.01"
           - name: LOG_LEVEL
@@ -485,10 +495,10 @@ spec:
         resources:
           requests:
             cpu: "1"
-            memory: 2Gi
+            memory: 1Gi
           limits:
             cpu: "1"
-            memory: 2Gi
+            memory: 1Gi
         ports:
         - containerPort: 8085
         env:
@@ -499,6 +509,8 @@ spec:
                 divisor: "1"
           - name: GC
             value: "100"
+          - name: GOMEMLIMIT
+            value: "880MiB"
           - name: JAEGER_SAMPLE_RATIO
             value: "0.01"
           - name: LOG_LEVEL
@@ -566,10 +578,10 @@ spec:
         resources:
           requests:
             cpu: "1"
-            memory: 2Gi
+            memory: 256Mi
           limits:
             cpu: "1"
-            memory: 2Gi
+            memory: 256Mi
         ports:
         - containerPort: 8087
         env:
@@ -580,6 +592,8 @@ spec:
                 divisor: "1"
           - name: GC
             value: "100"
+          - name: GOMEMLIMIT
+            value: "200MiB"
           - name: JAEGER_SAMPLE_RATIO
             value: "0.01"
           - name: LOG_LEVEL
@@ -647,10 +661,10 @@ spec:
         resources:
           requests:
             cpu: "1"
-            memory: 2Gi
+            memory: 256Mi
           limits:
             cpu: "1"
-            memory: 2Gi
+            memory: 256Mi
         ports:
         - containerPort: 8082
         env:
@@ -661,6 +675,8 @@ spec:
                 divisor: "1"
           - name: GC
             value: "100"
+          - name: GOMEMLIMIT
+            value: "200MiB"
           - name: JAEGER_SAMPLE_RATIO
             value: "0.01"
           - name: LOG_LEVEL
@@ -728,10 +744,10 @@ spec:
         resources:
           requests:
             cpu: "1"
-            memory: 2Gi
+            memory: 384Mi
           limits:
             cpu: "1"
-            memory: 2Gi
+            memory: 384Mi
         ports:
         - containerPort: 8086
         env:
@@ -742,6 +758,8 @@ spec:
                 divisor: "1"
           - name: GC
             value: "100"
+          - name: GOMEMLIMIT
+            value: "320MiB"
           - name: JAEGER_SAMPLE_RATIO
             value: "0.01"
           - name: LOG_LEVEL

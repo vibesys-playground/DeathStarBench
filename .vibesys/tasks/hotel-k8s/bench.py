@@ -8,7 +8,8 @@ data is dataset.py's. The workload (operations, request distributions, the
 model the writes change and the checks of the responses) is the Go generator
 of evaluator/cmd/generator, which shares its model with the accuracy oracle;
 this script orchestrates: it validates the candidate's application tier
-against the capacity envelope, deploys, runs the phases and reports.
+against the capacity envelope, makes sure the node holds the data snapshot
+(snapshot.py), deploys, runs the phases and reports.
 """
 
 from __future__ import annotations
@@ -16,15 +17,16 @@ from __future__ import annotations
 import argparse
 import os
 import statistics
+import subprocess
 import sys
-import threading
-import time
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import dataset as ds  # noqa: E402
 import envelope  # noqa: E402
+import snapshot  # noqa: E402
 import vibesys_evaluator as vse  # noqa: E402
 from vibesys_evaluator.deploy import k8s  # noqa: E402
 from vibesys_evaluator.service import Generator, get  # noqa: E402
@@ -39,67 +41,28 @@ MONGO = {
     "reservation-db": "mongodb-reservation:27022",
     "user-db": "mongodb-user:27023",
 }
-INSERT_BATCH = 1000
+VERIFY_SAMPLES = 200  # random hotels and users compared document by document
 
 
-def seed(data: ds.Dataset) -> None:
-    """Write the dataset into the six MongoDB servers (runs in the seed Job).
+def seed(data: ds.Spec, *, run=subprocess.run) -> None:
+    """Check what the six MongoDB servers hold (runs in the seed Job).
 
-    It runs once the data tier is available and before the services start:
-    each service seeds its own test data only into an empty collection, and
-    geo and recommendation load their collection once at startup. Each
-    collection is replaced: dropped, filled in batches, indexed, counted.
+    The data is not written here: each MongoDB pod restored its database from the node's
+    snapshot of this dataset before mongod started (snapshot.py; `prepare` made sure it
+    exists and put its version into the manifest). `hotel-data verify` checks each server's
+    snapshot marker names the dataset's version and that the collections, their indexes and
+    counts, and the documents of random hotels and users are the generator's. It runs once
+    the data tier is available and before the services start.
     """
-    import pymongo  # in the task image
-
-    collections = ds.documents(data)
-    print(f"seed: documents digest {ds.documents_digest(collections)}", flush=True)
-    errors: list[str] = []
-
-    def write(database: str) -> None:
-        client = pymongo.MongoClient(f"mongodb://{MONGO[database]}", serverSelectionTimeoutMS=5000)
-        deadline = time.monotonic() + 300
-        while True:
-            try:
-                client.admin.command("ping")
-                break
-            except pymongo.errors.PyMongoError:
-                if time.monotonic() > deadline:
-                    raise
-                time.sleep(1)
-        for collection in (c for c in collections if c.database == database):
-            started = time.monotonic()
-            db = client[database]
-            db.drop_collection(collection.name)
-            db.create_collection(collection.name)
-            target = db[collection.name]
-            documents = [dict(d) for d in collection.documents]  # insert_many adds _id
-            for start in range(0, len(documents), INSERT_BATCH):
-                target.insert_many(documents[start:start + INSERT_BATCH], ordered=True)
-            target.create_indexes([
-                pymongo.IndexModel([(key, pymongo.ASCENDING) for key in keys], name=name, unique=unique)
-                for name, keys, unique in collection.indexes
-            ])
-            count = target.count_documents({})
-            if count != len(documents):
-                errors.append(f"{database}.{collection.name} holds {count} documents, want {len(documents)}")
-            print(f"seed: {database}.{collection.name}: {count} documents in "
-                  f"{time.monotonic() - started:.1f}s", flush=True)
-        client.close()
-
-    def guarded(database: str) -> None:
-        try:
-            write(database)
-        except Exception as error:  # reported below, as the Job's failure
-            errors.append(f"{database}: {type(error).__name__}: {error}")
-
-    threads = [threading.Thread(target=guarded, args=(database,)) for database in MONGO]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    if errors:
-        raise RuntimeError("; ".join(sorted(errors)))
+    with tempfile.NamedTemporaryFile("wb", suffix=".json") as spec:
+        spec.write(ds.encode(data))
+        spec.flush()
+        argv = ["hotel-data", "verify", "--dataset", spec.name, "--samples", str(VERIFY_SAMPLES)]
+        for database, address in MONGO.items():
+            argv += ["--server", f"{database}={address}"]
+        result = run(argv, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"the data tier does not hold the task's dataset (hotel-data verify exited {result.returncode})")
 
 
 # -------------------------------------------------- (1) system under test
@@ -119,8 +82,8 @@ SYSTEM = k8s.App(
     name="hotel-k8s",
     manifest=DEPLOYED,  # ${NAMESPACE} and ${HOTEL_IMAGE} are substituted
     images={"HOTEL_IMAGE": "hotelReservation"},  # built from PROJECT_ROOT/hotelReservation
-    # MongoDB, memcached, consul and jaeger: applied and available before the seed; the
-    # candidate's application Deployments start after it.
+    # MongoDB (restored from the node's snapshot), memcached, consul and jaeger: applied and
+    # available before the seed; the candidate's application Deployments start after it.
     data_tier="tier=data",
     seed=seed,
     gateway="http://frontend:5000",
@@ -175,15 +138,21 @@ def benchmark(run: vse.Run) -> None:
 
 # ------------------------------------------------------------- (5) validity
 
-_ENVELOPE_ERROR: list[envelope.EnvelopeError] = []
+_PREPARE_ERROR: list[Exception] = []
+
+# How long a sample waits for the data snapshot: a first build takes about 25 minutes; past
+# this the sample fails and the data Job keeps building for the next one.
+SNAPSHOT_WAIT_SECONDS = 2700
 
 
-def prepare(argv: list[str], target: Path) -> envelope.App | None:
-    """For `benchmark`: validate the candidate's application tier and write the deployed manifest.
+def prepare(argv: list[str], target: Path, *, ensure=snapshot.ensure, environ=os.environ) -> envelope.App | None:
+    """For `benchmark`: validate the candidate's application tier, make sure the node holds
+    the data snapshot, and write the deployed manifest (restoring that snapshot).
 
-    A violation is kept and raised by `dataset()`, the first thing a sample calls inside
+    A failure is kept and raised by `dataset()`, the first thing a sample calls inside
     its error handling and before it builds or deploys anything, so that the sample fails
-    with the validator's message in its records.
+    with the validator's (or the snapshot's) message in its records. The envelope is checked
+    first: a candidate outside it fails before the snapshot is looked at.
     """
     if argv[:1] != ["benchmark"]:
         return None
@@ -191,15 +160,21 @@ def prepare(argv: list[str], target: Path) -> envelope.App | None:
     parser.add_argument("--project-root", type=Path, required=True)
     args, _ = parser.parse_known_args(argv[1:])
     target.unlink(missing_ok=True)
+    log = lambda line: print(line, file=sys.stderr, flush=True)  # noqa: E731
     try:
-        app = envelope.load(args.project_root.resolve(), log=lambda line: print(line, file=sys.stderr))
-    except envelope.EnvelopeError as error:
-        _ENVELOPE_ERROR.append(error)
+        app = envelope.load(args.project_root.resolve(), log=log)
+        registry, builder = environ.get("VIBESYS_K8S_REGISTRY", ""), environ.get("VIBESYS_K8S_BUILDER", "")
+        if not registry or not builder:
+            raise snapshot.SnapshotError("VIBESYS_K8S_REGISTRY and VIBESYS_K8S_BUILDER must be set (the data snapshot's Job)")
+        version = ensure(ds.encode(ds.generate()).decode(), registry=registry, builder=builder,
+                         deadline_seconds=SNAPSHOT_WAIT_SECONDS, log=log).version
+    except (envelope.EnvelopeError, snapshot.SnapshotError) as error:
+        _PREPARE_ERROR.append(error)
         return None
     temporary = target.with_suffix(".tmp")
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        temporary.write_text(envelope.compose(app))
+        temporary.write_text(envelope.compose(app, version))
         os.replace(temporary, target)
     except OSError as error:
         raise SystemExit(
@@ -209,9 +184,9 @@ def prepare(argv: list[str], target: Path) -> envelope.App | None:
     return app
 
 
-def dataset() -> ds.Dataset:
-    if _ENVELOPE_ERROR:
-        raise _ENVELOPE_ERROR[0]
+def dataset() -> ds.Spec:
+    if _PREPARE_ERROR:
+        raise _PREPARE_ERROR[0]
     return ds.generate()
 
 

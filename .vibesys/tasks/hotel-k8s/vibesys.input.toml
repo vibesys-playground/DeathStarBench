@@ -10,12 +10,13 @@ needs = ["kubernetes"]
 # Both commands run the trusted task code baked into the task image at /task; they
 # read KUBECONFIG, VIBESYS_K8S_REGISTRY and VIBESYS_K8S_BUILDER from the environment.
 # The check is run.py (the Go semantic oracle); the benchmark is bench.py, on
-# vibesys-evaluator (one sample per run).
+# vibesys-evaluator (one sample per run). The timeouts cover a job that finds no data
+# snapshot on the node and waits for its first build (about 25 minutes; snapshot.py).
 [accuracy]
 command = ["python", "/task/run.py", "check", "--project-root", "${PROJECT_ROOT}"]
-timeout_seconds = 1800
+timeout_seconds = 6000
 
 [benchmark]
 command = ["python", "/task/bench.py", "benchmark", "--project-root", "${PROJECT_ROOT}"]
-timeout_seconds = 2400
+timeout_seconds = 5400
 result_protocol = 2

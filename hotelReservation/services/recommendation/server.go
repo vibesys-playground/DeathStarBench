@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
@@ -31,11 +32,18 @@ const name = "srv-recommendation"
 type Server struct {
 	pb.UnimplementedRecommendationServer
 
-	// mu guards hotels, which the startup load, AddHotel and the refresh
-	// from MongoDB (changes.Watch) update while requests read it.
-	mu     sync.RWMutex
-	hotels map[string]Hotel
-	uuid   string
+	// mu guards hotels and its indexes, which the startup load, AddHotel and
+	// the refresh from MongoDB (changes.Watch) update while requests read
+	// them: byLat (the hotels sorted by latitude, for the nearest-hotel scan)
+	// and the hotels of the highest rating and of the lowest price.
+	mu        sync.RWMutex
+	hotels    map[string]Hotel
+	byLat     []Hotel
+	maxRate   float64
+	bestRated []string
+	minPrice  float64
+	cheapest  []string
+	uuid      string
 
 	Tracer      opentracing.Tracer
 	Port        int
@@ -103,7 +111,9 @@ func (s *Server) Load() error {
 	if err := changes.EnsureIndex(context.TODO(), database.Collection("recommendation")); err != nil {
 		return fmt.Errorf("index added hotels: %v", err)
 	}
-	s.hotels = loadRecommendations(s.MongoClient)
+	s.mu.Lock()
+	s.index(loadRecommendations(s.MongoClient))
+	s.mu.Unlock()
 	go changes.Watch(database, version, s.loadAdded)
 	return nil
 }
@@ -121,56 +131,11 @@ func (s *Server) GetRecommendations(ctx context.Context, req *pb.Request) (*pb.R
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if require == "dis" {
-		p1 := &geoindex.GeoPoint{
-			Pid:  "",
-			Plat: req.Lat,
-			Plon: req.Lon,
-		}
-		min := math.MaxFloat64
-		for _, hotel := range s.hotels {
-			tmp := float64(geoindex.Distance(p1, &geoindex.GeoPoint{
-				Pid:  "",
-				Plat: hotel.HLat,
-				Plon: hotel.HLon,
-			})) / 1000
-			if tmp < min {
-				min = tmp
-			}
-		}
-		for _, hotel := range s.hotels {
-			tmp := float64(geoindex.Distance(p1, &geoindex.GeoPoint{
-				Pid:  "",
-				Plat: hotel.HLat,
-				Plon: hotel.HLon,
-			})) / 1000
-			if tmp == min {
-				res.HotelIds = append(res.HotelIds, hotel.HId)
-			}
-		}
+		res.HotelIds = s.nearest(req.Lat, req.Lon)
 	} else if require == "rate" {
-		max := 0.0
-		for _, hotel := range s.hotels {
-			if hotel.HRate > max {
-				max = hotel.HRate
-			}
-		}
-		for _, hotel := range s.hotels {
-			if hotel.HRate == max {
-				res.HotelIds = append(res.HotelIds, hotel.HId)
-			}
-		}
+		res.HotelIds = append(res.HotelIds, s.bestRated...)
 	} else if require == "price" {
-		min := math.MaxFloat64
-		for _, hotel := range s.hotels {
-			if hotel.HPrice < min {
-				min = hotel.HPrice
-			}
-		}
-		for _, hotel := range s.hotels {
-			if hotel.HPrice == min {
-				res.HotelIds = append(res.HotelIds, hotel.HId)
-			}
-		}
+		res.HotelIds = append(res.HotelIds, s.cheapest...)
 	} else {
 		log.Warn().Msgf("Wrong require parameter: %v", require)
 	}
@@ -229,7 +194,7 @@ func (s *Server) AddHotel(ctx context.Context, req *pb.Hotel) (*pb.AddResult, er
 		return nil, status.Errorf(codes.Internal, "signal the change: %v", err)
 	}
 	s.mu.Lock()
-	s.hotels[req.HotelId] = Hotel{HId: req.HotelId, HLat: req.Lat, HLon: req.Lon, HRate: req.Rate, HPrice: req.Price}
+	s.add(Hotel{HId: req.HotelId, HLat: req.Lat, HLon: req.Lon, HRate: req.Rate, HPrice: req.Price})
 	s.mu.Unlock()
 	return &pb.AddResult{}, nil
 }
@@ -247,7 +212,102 @@ func (s *Server) loadAdded(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, hotel := range hotels {
-		s.hotels[hotel.HId] = hotel
+		s.add(hotel)
 	}
 	return nil
+}
+
+// index builds the indexes over a loaded catalog. The caller holds mu.
+func (s *Server) index(hotels map[string]Hotel) {
+	s.hotels = make(map[string]Hotel, len(hotels))
+	s.byLat = make([]Hotel, 0, len(hotels))
+	// As the scans over every hotel did: the highest rating from 0, the lowest
+	// price from MaxFloat64.
+	s.maxRate, s.bestRated, s.minPrice, s.cheapest = 0, nil, math.MaxFloat64, nil
+	for _, hotel := range hotels {
+		s.hotels[hotel.HId] = hotel
+		s.byLat = append(s.byLat, hotel)
+		s.extremes(hotel)
+	}
+	sort.Slice(s.byLat, func(i, j int) bool { return s.byLat[i].HLat < s.byLat[j].HLat })
+}
+
+// add puts a hotel into the catalog and its indexes; a known hotel is
+// replaced. The caller holds mu.
+func (s *Server) add(hotel Hotel) {
+	if old, ok := s.hotels[hotel.HId]; ok {
+		if old == hotel {
+			return
+		}
+		hotels := s.hotels
+		hotels[hotel.HId] = hotel
+		s.index(hotels)
+		return
+	}
+	s.hotels[hotel.HId] = hotel
+	at := sort.Search(len(s.byLat), func(i int) bool { return s.byLat[i].HLat >= hotel.HLat })
+	s.byLat = append(s.byLat, Hotel{})
+	copy(s.byLat[at+1:], s.byLat[at:])
+	s.byLat[at] = hotel
+	s.extremes(hotel)
+}
+
+func (s *Server) extremes(hotel Hotel) {
+	switch {
+	case hotel.HRate > s.maxRate:
+		s.maxRate, s.bestRated = hotel.HRate, []string{hotel.HId}
+	case hotel.HRate == s.maxRate:
+		s.bestRated = append(s.bestRated, hotel.HId)
+	}
+	switch {
+	case hotel.HPrice < s.minPrice:
+		s.minPrice, s.cheapest = hotel.HPrice, []string{hotel.HId}
+	case hotel.HPrice == s.minPrice:
+		s.cheapest = append(s.cheapest, hotel.HId)
+	}
+}
+
+// earthRadiusKm is go-geoindex's earth radius: its distance is a haversine
+// over it.
+const earthRadiusKm = 6371.0
+
+// nearest returns every hotel at the minimum distance (go-geoindex's, in km)
+// from the location. It scans outwards in latitude from the location and
+// stops once the latitude difference alone is farther than the best: a
+// great-circle distance is at least that arc. The caller holds mu (read).
+func (s *Server) nearest(lat, lon float64) []string {
+	p1 := &geoindex.GeoPoint{Pid: "", Plat: lat, Plon: lon}
+	start := sort.Search(len(s.byLat), func(i int) bool { return s.byLat[i].HLat >= lat })
+	best := math.MaxFloat64
+	var ids []string
+	visit := func(hotel *Hotel) {
+		distance := float64(geoindex.Distance(p1, &geoindex.GeoPoint{Pid: "", Plat: hotel.HLat, Plon: hotel.HLon})) / 1000
+		switch {
+		case distance < best:
+			best, ids = distance, append(ids[:0], hotel.HId)
+		case distance == best:
+			ids = append(ids, hotel.HId)
+		}
+	}
+	beyond := func(hotel *Hotel) bool {
+		bound := earthRadiusKm * math.Abs(hotel.HLat-lat) * math.Pi / 180
+		return bound > best*(1+1e-9)+1e-9
+	}
+	for low, high := start-1, start; low >= 0 || high < len(s.byLat); {
+		progressed := false
+		if high < len(s.byLat) && !beyond(&s.byLat[high]) {
+			visit(&s.byLat[high])
+			high++
+			progressed = true
+		}
+		if low >= 0 && !beyond(&s.byLat[low]) {
+			visit(&s.byLat[low])
+			low--
+			progressed = true
+		}
+		if !progressed {
+			break
+		}
+	}
+	return ids
 }

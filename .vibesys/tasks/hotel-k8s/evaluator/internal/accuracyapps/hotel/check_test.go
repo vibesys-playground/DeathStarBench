@@ -492,7 +492,7 @@ func TestCheckRejectsWrongAnswers(t *testing.T) {
 		},
 		"search adds a hotel": func(path string, ids []string) []string {
 			if path == "/hotels" {
-				return append(ids, "25000")
+				return append(ids, strconv.Itoa(hotelsupport.DefaultReference().Data.HotelCount())) // the last hotel
 			}
 			return ids
 		},
@@ -555,14 +555,15 @@ func TestCatalogAndSearchableHotelsComeFromTheDataset(t *testing.T) {
 		t.Fatal(err)
 	}
 	data := hotelsupport.DefaultReference().Data
-	if len(catalog) != len(data.Hotels) {
-		t.Fatalf("catalog has %d profiles", len(catalog))
+	if catalog.size() != data.HotelCount() {
+		t.Fatalf("catalog has %d profiles", catalog.size())
 	}
 	searchable := sortedRateBackedIDs()
-	if len(searchable) < len(data.Hotels)*99/100 {
-		t.Fatalf("only %d of %d hotels are found by a search at their own location", len(searchable), len(data.Hotels))
+	tried := min(data.HotelCount(), searchableSample)
+	if len(searchable) < tried*99/100 {
+		t.Fatalf("only %d of %d hotels are found by a search at their own location", len(searchable), tried)
 	}
-	t.Logf("%d of %d hotels are searchable at their own location", len(searchable), len(data.Hotels))
+	t.Logf("%d of %d hotels are searchable at their own location", len(searchable), tried)
 }
 
 // The check asks for the restarts each lifecycle check documents, sends

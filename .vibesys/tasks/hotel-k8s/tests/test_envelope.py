@@ -4,6 +4,7 @@ import copy
 import random
 import sys
 import shutil
+import subprocess
 import tempfile
 import unittest
 from fractions import Fraction
@@ -61,7 +62,15 @@ class ReferenceTest(Rejects):
         self.assertEqual(app.memory, envelope.APP_MEMORY)
         self.assertEqual(app.names, ["frontend", "geo", "profile", "rate", "recommendation", "reservation", "search", "user"])
         self.assertEqual(app.frontend, ("frontend",))
-        self.assertTrue(all(d.replicas == 2 and d.cpu == 1 and d.memory == 2 * 2**30 for d in app.deployments))
+        self.assertTrue(all(d.replicas == 2 and d.cpu == 1 for d in app.deployments))
+        mib = {d.name: d.memory // 2**20 for d in app.deployments}
+        self.assertEqual(mib, {"frontend": 384, "geo": 1280, "profile": 256, "rate": 256, "recommendation": 1024,
+                               "reservation": 256, "search": 256, "user": 384})
+
+    def test_the_memory_envelope_is_8_gib(self):
+        """An eleventh of the data's 112 GB (OBJECTIVE.md, Data): 8 GiB, not the 32 GiB before."""
+        self.assertEqual(envelope.APP_MEMORY, 8 * 2**30)
+        self.assertEqual(envelope.APP_CPU, 16)
 
     def test_base_candidate_carries_the_reference(self):
         """The base's own app.yaml is the reference topology, so its numbers are unchanged."""
@@ -91,13 +100,20 @@ class ReferenceTest(Rejects):
 
 class EnvelopeSumTest(Rejects):
     def test_one_millicore_over_fails(self):
-        docs = mutated(lambda d, p, c: set_resources(c, "1001m", "2Gi"))
+        docs = mutated(lambda d, p, c: set_resources(c, "1001m", "1280Mi"))
         message = self.assertRejected(docs, "envelope", "16.002 CPUs over the 16")
         self.assertIn("geo: 2 x 1.001", message)
 
     def test_one_byte_over_fails(self):
-        docs = mutated(lambda d, p, c: set_resources(c, "1", 2 * 2**30 + 1))
-        self.assertRejected(docs, "envelope", "memory limits sum")
+        docs = mutated(lambda d, p, c: set_resources(c, "1", 1280 * 2**20 + 1))
+        self.assertRejected(docs, "envelope", "memory limits sum", "over the 8 GiB")
+
+    def test_the_old_32_gib_split_fails(self):
+        docs = copy.deepcopy(REFERENCE_DOCS)
+        for doc in docs:
+            if doc["kind"] == "Deployment":
+                set_resources(doc["spec"]["template"]["spec"]["containers"][0], "1", "2Gi")
+        self.assertRejected(docs, "the memory limits sum to 32 GiB over the 8 GiB")
 
     def test_seventeen_cpus_fail(self):
         docs = mutated(lambda d, p, c: d["spec"].__setitem__("replicas", 3))
@@ -114,13 +130,13 @@ class EnvelopeSumTest(Rejects):
                     continue
                 replicas = rng.randint(2, 4)
                 millicores = rng.choice([100, 250, 500, 750, 1000, 1500, 2000, 3000])
-                mebibytes = rng.choice([256, 512, 1024, 2048, 4096])
+                mebibytes = rng.choice([64, 128, 256, 512, 1024])
                 doc["spec"]["replicas"] = replicas
                 container = doc["spec"]["template"]["spec"]["containers"][0]
                 set_resources(container, f"{millicores}m", f"{mebibytes}Mi")
                 cpu_total += replicas * Fraction(millicores, 1000)
                 memory_total += replicas * mebibytes * 2**20
-            within = cpu_total <= 16 and memory_total <= 32 * 2**30
+            within = cpu_total <= 16 and memory_total <= 8 * 2**30
             if within:
                 app = validate(docs)
                 self.assertEqual((app.cpu, app.memory), (cpu_total, memory_total))
@@ -146,7 +162,7 @@ class ContainerRulesTest(Rejects):
     def test_equal_spelled_differently_is_equal(self):
         def change(d, p, c):
             c["resources"]["requests"]["cpu"] = "1000m"
-            c["resources"]["requests"]["memory"] = "2048Mi"
+            c["resources"]["requests"]["memory"] = "1.25Gi"
         validate(mutated(change))
 
     def test_missing_requests_resources_and_extra_resources(self):
@@ -166,7 +182,7 @@ class ContainerRulesTest(Rejects):
     def test_gomaxprocs_equals_the_cpu_limit(self):
         def literal(value, cpu):  # noqa: ANN001, ANN202
             def change(d, p, c):
-                set_resources(c, cpu, "2Gi")
+                set_resources(c, cpu, "1280Mi")
                 c["env"] = [e for e in c["env"] if e["name"] != "GOMAXPROCS"] + [{"name": "GOMAXPROCS", "value": value}]
             return change
         validate(mutated(literal("1", "1")))
@@ -321,34 +337,103 @@ class LoadTest(unittest.TestCase):
             (TASK_DIR / "tests" / "testdata" / "regrouped.yaml").read_text(), source="r", task_text=TASK_TEXT
         )
         rendered = _manifest.render(
-            envelope.compose(app), namespace="hk8s-0", images={"HOTEL_IMAGE": "img"}, data_tier={"tier": "data"}
+            envelope.compose(app, "0123456789abcdef0123"), namespace="hk8s-0", images={"HOTEL_IMAGE": "img"},
+            data_tier={"tier": "data"},
         )
         self.assertEqual([o["metadata"]["name"] for o in rendered.rest], app.names)
         self.assertIn(("Service", "frontend"), {(o["kind"], o["metadata"]["name"]) for o in rendered.first})
 
 
+class FakeEnsure:
+    """snapshot.ensure as the bench calls it: records the call, returns a version or fails."""
+
+    def __init__(self, error=None):  # noqa: ANN001
+        self.calls, self.error = [], error
+
+    def __call__(self, spec_json, **kwargs):  # noqa: ANN001, ANN204
+        import snapshot  # noqa: PLC0415
+
+        self.calls.append((spec_json, kwargs))
+        if self.error:
+            raise snapshot.SnapshotError(self.error)
+        return snapshot.Ensured(version="0123456789abcdef0123", seconds=1.0, summary={})
+
+
+ENV = {"VIBESYS_K8S_REGISTRY": "registry:5000", "VIBESYS_K8S_BUILDER": "tcp://builder:1234"}
+
+
 class BenchPrepareTest(unittest.TestCase):
+    def tearDown(self):
+        import bench  # noqa: PLC0415
+
+        bench._PREPARE_ERROR.clear()
+
     def test_prepare_writes_the_deployed_manifest_or_keeps_the_violation(self):
         import bench
+        import dataset
 
         # The task image holds regular files only: vibesys-cli builds it without symlinks (j10).
         self.assertFalse([p for p in TASK_DIR.rglob("*") if p.is_symlink()])
         with tempfile.TemporaryDirectory() as directory:
             root, target = Path(directory) / "repo", Path(directory) / "out" / "manifest.yaml"
-            app = bench.prepare(["benchmark", "--project-root", str(root), "--vs-output", "x"], target)
-            self.assertEqual(target.read_text(), envelope.compose(app))
-            self.assertIsNone(bench.prepare(["phase", "--work", "w"], target))
+            ensure = FakeEnsure()
+            app = bench.prepare(["benchmark", "--project-root", str(root), "--vs-output", "x"], target,
+                                ensure=ensure, environ=ENV)
+            self.assertEqual(target.read_text(), envelope.compose(app, "0123456789abcdef0123"))
+            self.assertIn("/snapshots/0123456789abcdef0123/reservation-db", target.read_text())
+            self.assertNotIn("@DATA_SNAPSHOT_VERSION@", target.read_text())
+            (spec_json, kwargs), = ensure.calls
+            self.assertEqual(spec_json.encode(), dataset.encode(dataset.SPEC))
+            self.assertEqual((kwargs["registry"], kwargs["builder"]), ("registry:5000", "tcp://builder:1234"))
+            self.assertIsNone(bench.prepare(["phase", "--work", "w"], target, ensure=ensure, environ=ENV))
+            self.assertEqual(len(ensure.calls), 1)
             path = root / envelope.CANDIDATE_APP
             path.parent.mkdir(parents=True)
             path.write_text(dump(mutated(lambda d, p, c: d["spec"].__setitem__("replicas", 3))))
-            try:
-                self.assertIsNone(bench.prepare(["benchmark", "--project-root", str(root)], target))
-                self.assertFalse(target.exists())
-                with self.assertRaises(envelope.EnvelopeError) as caught:
-                    bench.dataset()
-                self.assertIn("17 CPUs over the 16", str(caught.exception))
-            finally:
-                bench._ENVELOPE_ERROR.clear()
+            self.assertIsNone(bench.prepare(["benchmark", "--project-root", str(root)], target, ensure=ensure, environ=ENV))
+            self.assertFalse(target.exists())
+            self.assertEqual(len(ensure.calls), 1)  # the envelope fails first: no snapshot work
+            with self.assertRaises(envelope.EnvelopeError) as caught:
+                bench.dataset()
+            self.assertIn("17 CPUs over the 16", str(caught.exception))
+
+    def test_a_snapshot_failure_fails_the_sample(self):
+        import bench
+        import snapshot
+
+        with tempfile.TemporaryDirectory() as directory:
+            root, target = Path(directory) / "repo", Path(directory) / "manifest.yaml"
+            ensure = FakeEnsure("the data snapshot is not ready after 2700s")
+            self.assertIsNone(bench.prepare(["benchmark", "--project-root", str(root)], target, ensure=ensure, environ=ENV))
+            self.assertFalse(target.exists())
+            with self.assertRaises(snapshot.SnapshotError) as caught:
+                bench.dataset()
+            self.assertIn("not ready", str(caught.exception))
+            bench._PREPARE_ERROR.clear()
+            self.assertIsNone(bench.prepare(["benchmark", "--project-root", str(root)], target, ensure=FakeEnsure(), environ={}))
+            with self.assertRaises(snapshot.SnapshotError):
+                bench.dataset()
+
+
+class BenchSeedTest(unittest.TestCase):
+    def test_seed_verifies_every_server_against_the_spec(self):
+        import bench
+        import dataset
+
+        seen = []
+
+        def run(argv, check):  # noqa: ANN001, ANN202
+            seen.append((argv, Path(argv[argv.index("--dataset") + 1]).read_bytes()))
+            return subprocess.CompletedProcess(argv, 0)
+
+        bench.seed(dataset.generate(), run=run)
+        (argv, spec), = seen
+        self.assertEqual(argv[:2], ["hotel-data", "verify"])
+        self.assertEqual(spec, dataset.encode(dataset.SPEC))
+        servers = [argv[i + 1] for i, a in enumerate(argv) if a == "--server"]
+        self.assertEqual(servers, [f"{db}={address}" for db, address in bench.MONGO.items()])
+        with self.assertRaises(RuntimeError):
+            bench.seed(dataset.generate(), run=lambda argv, check: subprocess.CompletedProcess(argv, 1))
 
 
 if __name__ == "__main__":

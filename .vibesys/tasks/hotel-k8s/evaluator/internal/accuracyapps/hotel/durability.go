@@ -87,7 +87,7 @@ func (a *Application) verifyDurableState(
 				fmt.Sprintf("durable-%d-search", caseIndex),
 				differentialAction{
 					Kind:  actionSearch,
-					Query: searchQuery(night.Night, a.catalog[night.FullHotel], true),
+					Query: searchQuery(night.Night, a.catalog.at(night.FullHotel), true),
 				},
 			))
 		}

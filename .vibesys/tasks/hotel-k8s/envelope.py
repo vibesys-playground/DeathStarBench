@@ -44,7 +44,7 @@ REFERENCE_APP = TASK_DIR / "k8s" / "app.yaml"
 CANDIDATE_APP = Path("hotelReservation") / "deploy" / "app.yaml"
 
 APP_CPU = Fraction(16)  # CPUs, the sum of the application containers' limits
-APP_MEMORY = 32 * 2**30  # bytes (32 GiB)
+APP_MEMORY = 8 * 2**30  # bytes (8 GiB): an eleventh of the data (OBJECTIVE.md, Data)
 MIN_REPLICAS = 2
 MIN_CPU = Fraction(1, 10)  # per container
 MIN_MEMORY = 64 * 2**20  # per container (64 MiB)
@@ -533,6 +533,10 @@ def load(project_root: Path, *, log=None) -> App:  # noqa: ANN001
     return app
 
 
-def compose(app: App) -> str:
-    """The whole manifest: the task's data tier and configuration, then the application."""
-    return TASK_MANIFEST.read_text().rstrip("\n") + "\n---\n# The application tier: " + app.source + "\n" + app.text
+def compose(app: App, data_version: str) -> str:
+    """The whole manifest: the task's data tier (restoring snapshot data_version) and
+    configuration, then the application."""
+    import snapshot  # noqa: PLC0415 (the task directory is on sys.path of every caller)
+
+    task = snapshot.render(TASK_MANIFEST.read_text(), data_version)
+    return task.rstrip("\n") + "\n---\n# The application tier: " + app.source + "\n" + app.text

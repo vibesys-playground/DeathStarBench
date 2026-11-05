@@ -1,5 +1,5 @@
 # A regrouped application tier within the envelope (tests): frontend as web (3 x 2 CPU),
-# search, geo and rate in one pod (2 x 2 CPU), the rest smaller: 15 CPUs, 22 GiB.
+# search, geo and rate in one pod (2 x 2 CPU), the rest smaller: 15 CPUs, 5.5 GiB.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -38,10 +38,10 @@ spec:
         resources:
           requests:
             cpu: '2'
-            memory: 2Gi
+            memory: 512Mi
           limits:
             cpu: '2'
-            memory: 2Gi
+            memory: 512Mi
         ports:
         - containerPort: 5000
         env:
@@ -105,10 +105,10 @@ spec:
         resources:
           requests:
             cpu: '1'
-            memory: 1Gi
+            memory: 256Mi
           limits:
             cpu: '1'
-            memory: 1Gi
+            memory: 256Mi
         ports:
         - containerPort: 8082
         env:
@@ -139,10 +139,10 @@ spec:
         resources:
           requests:
             cpu: 500m
-            memory: 1Gi
+            memory: 256Mi
           limits:
             cpu: 500m
-            memory: 1Gi
+            memory: 256Mi
         ports:
         - containerPort: 8083
         env:
@@ -173,10 +173,10 @@ spec:
         resources:
           requests:
             cpu: '0.5'
-            memory: 1Gi
+            memory: 256Mi
           limits:
             cpu: '0.5'
-            memory: 1Gi
+            memory: 256Mi
         ports:
         - containerPort: 8084
         env:
@@ -254,10 +254,10 @@ spec:
         resources:
           requests:
             cpu: '1'
-            memory: 2Gi
+            memory: 512Mi
           limits:
             cpu: '1'
-            memory: 2Gi
+            memory: 512Mi
         ports:
         - containerPort: 8081
         env:
@@ -330,10 +330,10 @@ spec:
         resources:
           requests:
             cpu: 500m
-            memory: 1Gi
+            memory: 256Mi
           limits:
             cpu: 500m
-            memory: 1Gi
+            memory: 256Mi
         ports:
         - containerPort: 8087
         env:
@@ -406,10 +406,10 @@ spec:
         resources:
           requests:
             cpu: 500m
-            memory: 1Gi
+            memory: 256Mi
           limits:
             cpu: 500m
-            memory: 1Gi
+            memory: 256Mi
         ports:
         - containerPort: 8086
         env:
@@ -482,10 +482,10 @@ spec:
         resources:
           requests:
             cpu: 500m
-            memory: 1Gi
+            memory: 256Mi
           limits:
             cpu: 500m
-            memory: 1Gi
+            memory: 256Mi
         ports:
         - containerPort: 8085
         env:

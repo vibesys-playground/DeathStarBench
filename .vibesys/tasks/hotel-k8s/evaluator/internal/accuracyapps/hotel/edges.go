@@ -134,7 +134,7 @@ func (a *Application) verifyEndpointLiveness(
 ) (int, error) {
 	username, password := hotelsupport.User(0)
 	night := namespacedNight(seed, livenessOffset)
-	unknown := strconv.Itoa(1_000_000 + random.Intn(1_000_000))
+	unknown := strconv.Itoa(hotelsupport.DefaultReference().Data.HotelCount() + 1 + random.Intn(1_000_000))
 	query := reservationActionQuery(unknown, night, 1, "liveness-unknown-hotel", username, password)
 
 	result := c.request(ctx, "/reservation", query)

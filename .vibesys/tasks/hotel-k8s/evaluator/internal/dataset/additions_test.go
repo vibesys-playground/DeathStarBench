@@ -13,7 +13,8 @@ func TestSandboxesAreFarFromTheSeededHotels(t *testing.T) {
 	}
 	// The region's bounding box is more than 1,000 km (9 degrees of
 	// latitude, or longitude at most latitudes) from every seeded hotel.
-	for _, hotel := range Default().Hotels {
+	for index := range Default().HotelCount() {
+		hotel := Default().Hotel(index)
 		inLat := hotel.Lat > sandboxLatMin-9 && hotel.Lat < sandboxLatMax+9
 		inLon := hotel.Lon > sandboxLonMin-12 && hotel.Lon < sandboxLonMax+12
 		if inLat && inLon {
@@ -63,7 +64,7 @@ func TestAddedHotelsAndWriteValues(t *testing.T) {
 	if _, err := strconv.Atoi(first.ID); err == nil {
 		t.Fatal("an added ID looks like a seeded one")
 	}
-	seeded := &Default().Hotels[0]
+	seeded := Default().Hotel(0)
 	names := map[string]bool{}
 	for random := uint64(0); random < 50; random++ {
 		phone := NewPhone(seeded, random)

@@ -250,7 +250,7 @@ func (a *Application) fuzzedSearch(random *rand.Rand) (map[string]string, []stri
 		return nil, nil, err
 	}
 	for attempt := 0; attempt < 16; attempt++ {
-		anchor := a.catalog[strconv.Itoa(1+random.Intn(len(a.catalog)))]
+		anchor := a.catalog.at(strconv.Itoa(1 + random.Intn(a.catalog.size())))
 		jitter := func() float64 { return (random.Float64()*2 - 1) / 1000.0 }
 		query := map[string]string{
 			"inDate":  start.Format(time.DateOnly),
@@ -313,7 +313,7 @@ func (a *Application) verifyRecommendations(ctx context.Context, c client, rando
 		if err := checkContext(ctx); err != nil {
 			return checks, err
 		}
-		expected := a.catalog[strconv.Itoa(1+random.Intn(len(a.catalog)))]
+		expected := a.catalog.at(strconv.Itoa(1 + random.Intn(a.catalog.size())))
 		query := map[string]string{
 			"require": "dis",
 			"lat":     strconv.FormatFloat(expected.recommendLat, 'f', -1, 64),
@@ -339,7 +339,7 @@ func (a *Application) verifyRecommendations(ctx context.Context, c client, rando
 	// Probe non-catalog coordinates derived from the runtime seed, within a
 	// few hundred metres of a random hotel; the model computes the answer.
 	for caseIndex := 0; caseIndex < 2*max(4, sampled/20); caseIndex++ {
-		anchor := a.catalog[strconv.Itoa(1+random.Intn(len(a.catalog)))]
+		anchor := a.catalog.at(strconv.Itoa(1 + random.Intn(a.catalog.size())))
 		jitter := func() float64 { return (random.Float64()*2 - 1) / 300.0 }
 		lat := anchor.recommendLat + jitter()
 		lon := anchor.recommendLon + jitter()
@@ -434,7 +434,7 @@ func (a *Application) verifyOptionalReservationNumber(
 	random *rand.Rand,
 ) (int, error) {
 	username, password := hotelsupport.User(0)
-	hotelID := strconv.Itoa(1 + random.Intn(len(a.catalog)))
+	hotelID := strconv.Itoa(1 + random.Intn(a.catalog.size()))
 	capacity, err := hotelsupport.Capacity(hotelID)
 	if err != nil {
 		return 0, err
@@ -491,7 +491,7 @@ func (a *Application) verifySearchAvailability(
 		return 2, fmt.Errorf("search availability setup visibility: %w", err)
 	}
 
-	anchor := a.catalog[hotelID]
+	anchor := a.catalog.at(hotelID)
 	search := func(date [2]string) (map[string]feature, error) {
 		return c.geoJSON(ctx, "/hotels", map[string]string{
 			"inDate": date[0], "outDate": date[1],
@@ -662,7 +662,7 @@ func (a *Application) verifyCrashRecovery(
 	if a.strict.DurableAvailability {
 		program.Steps = append(program.Steps, callStep("crash-recovery-search", differentialAction{
 			Kind:  actionSearch,
-			Query: searchQuery(dates, a.catalog[hotelID], true),
+			Query: searchQuery(dates, a.catalog.at(hotelID), true),
 		}))
 	}
 	return a.verifyHotelProgram(ctx, c, program, crash, startCandidate)

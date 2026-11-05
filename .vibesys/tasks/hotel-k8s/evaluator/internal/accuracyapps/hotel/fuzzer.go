@@ -88,19 +88,19 @@ func (a *Application) observeDifferentialAction(
 func generateSequentialProgram(
 	seed int64,
 	cases int,
-	catalog map[string]profile,
+	catalog catalog,
 ) (accuracy.Program[differentialAction], error) {
 	if cases < 1 {
 		return accuracy.Program[differentialAction]{}, fmt.Errorf(
 			"Hotel differential cases must be positive, got %d", cases,
 		)
 	}
-	if len(catalog) == 0 {
+	if catalog.size() == 0 {
 		return accuracy.Program[differentialAction]{}, fmt.Errorf("Hotel differential catalog is empty")
 	}
 	random := rand.New(rand.NewSource(seed ^ 0x4d6f64656c))
 	history := make([]differentialAction, 0, 5+cases*9)
-	randomHotel := func() profile { return catalog[strconv.Itoa(1+random.Intn(len(catalog)))] }
+	randomHotel := func() profile { return catalog.at(strconv.Itoa(1 + random.Intn(catalog.size()))) }
 
 	username, password := hotelsupport.User(random.Intn(hotelsupport.UserCount()))
 	history = append(history,
@@ -112,7 +112,7 @@ func generateSequentialProgram(
 	distanceID := randomHotel().id
 	history = append(history, differentialAction{
 		Kind:  actionRecommend,
-		Query: recommendationQuery("dis", catalog[distanceID], random.Intn(2) == 0),
+		Query: recommendationQuery("dis", catalog.at(distanceID), random.Intn(2) == 0),
 	})
 
 	rateIDs := sortedRateBackedIDs()
@@ -141,14 +141,14 @@ func generateSequentialProgram(
 		validUser, validPassword := hotelsupport.User(random.Intn(hotelsupport.UserCount()))
 
 		history = append(history,
-			differentialAction{Kind: actionSearch, Query: searchQuery(primaryDates, catalog[primary], caseIndex%2 == 0)},
+			differentialAction{Kind: actionSearch, Query: searchQuery(primaryDates, catalog.at(primary), caseIndex%2 == 0)},
 			differentialAction{Kind: actionReserve, Query: reservationActionQuery(
 				primary, primaryDates, firstRooms, fmt.Sprintf("differential-%d-first", caseIndex), validUser, validPassword,
 			)},
 			differentialAction{Kind: actionReserve, Query: reservationActionQuery(
 				primary, primaryDates, secondRooms, fmt.Sprintf("differential-%d-fill", caseIndex), validUser, validPassword,
 			)},
-			differentialAction{Kind: actionSearch, Query: searchQuery(primaryDates, catalog[primary], caseIndex%2 != 0)},
+			differentialAction{Kind: actionSearch, Query: searchQuery(primaryDates, catalog.at(primary), caseIndex%2 != 0)},
 			differentialAction{Kind: actionReserve, Query: reservationActionQuery(
 				primary, primaryDates, 1, fmt.Sprintf("differential-%d-over", caseIndex), validUser, validPassword,
 			)},
@@ -158,7 +158,7 @@ func generateSequentialProgram(
 			differentialAction{Kind: actionReserve, Query: reservationActionQuery(
 				primary, authDates, 1, fmt.Sprintf("differential-%d-auth-readback", caseIndex), validUser, validPassword,
 			)},
-			differentialAction{Kind: actionSearch, Query: searchQuery(authDates, catalog[primary], true)},
+			differentialAction{Kind: actionSearch, Query: searchQuery(authDates, catalog.at(primary), true)},
 			differentialAction{Kind: actionReserve, Query: reservationActionQuery(
 				isolation, authDates, 1, fmt.Sprintf("differential-%d-isolation", caseIndex), validUser, validPassword,
 			)},

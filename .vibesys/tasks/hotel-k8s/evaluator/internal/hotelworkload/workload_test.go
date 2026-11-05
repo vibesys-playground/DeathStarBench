@@ -2,7 +2,6 @@ package hotelworkload
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"strconv"
 	"testing"
@@ -14,16 +13,10 @@ import (
 	"vibesys/hotel-k8s-evaluator/internal/dataset"
 )
 
-// TestMain needs the task's dataset file, which dataset.py writes:
-//
-//	python dataset.py /tmp/dataset.json; HOTEL_DATASET=/tmp/dataset.json go test ./...
-//
-// Without it the package's tests are skipped.
+// TestMain generates the tests' dataset: dataset.TestSpec (the file $HOTEL_DATASET names, else
+// a small dataset of the production shape).
 func TestMain(m *testing.M) {
-	if _, err := dataset.Load(); err != nil {
-		fmt.Printf("skipping %s: %v\n", "internal/hotelworkload", err)
-		os.Exit(0)
-	}
+	dataset.UseTestDataset()
 	os.Exit(m.Run())
 }
 
@@ -195,7 +188,7 @@ func TestSearchCheckAcceptsTheReferenceAndRejectsOthers(t *testing.T) {
 
 func TestProfileWritesAreVisibleWithinTheBound(t *testing.T) {
 	m := newModel(t)
-	h := &m.data.Hotels[0]
+	h := m.data.Hotel(0)
 	write := done(t, profileInfo{Hotel: h.ID, Name: h.Name, Phone: "new"}, 10, 10.2, map[string]string{"message": "Profile updated."})
 	if err := m.applyProfile(write); err != nil {
 		t.Fatal(err)
@@ -232,7 +225,7 @@ func ratesBody(h *dataset.Hotel) map[string]any {
 
 func TestRatesCheck(t *testing.T) {
 	m := newModel(t)
-	h := &m.data.Hotels[5]
+	h := m.data.Hotel(5)
 	body := ratesBody(h)
 	if err := m.checkRates(done(t, hotelInfo{h.ID}, 0, 0.1, body)); err != nil {
 		t.Fatal(err)
@@ -246,7 +239,7 @@ func TestRatesCheck(t *testing.T) {
 
 func TestRateWritesAreVisibleWithinTheBound(t *testing.T) {
 	m := newModel(t)
-	h := &m.data.Hotels[5]
+	h := m.data.Hotel(5)
 	plan := h.RatePlans[0]
 	prices := [3]float64{plan.TotalRate + 1, plan.TotalRate + 1, plan.TotalRateInclusive + 1}
 	if err := m.applyRate(done(t, rateInfo{Hotel: h.ID, Code: plan.Code, Prices: prices}, 10, 10.2)); err != nil {

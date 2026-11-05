@@ -2,13 +2,17 @@
 """Trusted wrapper for the hotel-k8s task's accuracy check (the benchmark is bench.py).
 
     run.py check     --project-root ROOT
+    run.py data                                               (build the data snapshot only)
     run.py sweep                                              (delete stale namespaces only)
 
 The check builds the candidate image from ROOT/hotelReservation and the task
 image (this directory: dataset.py, bench.py, hotel-correctness, podctl) with
-buildctl, pushes them to the registry, deploys the task-owned data tier into a
-fresh namespace of the cluster, seeds MongoDB with the task's dataset (Job
-"seed": bench.py's seed, as a benchmark sample seeds), deploys the candidate's
+buildctl, pushes them to the registry, makes sure the node holds the data
+snapshot of the task's dataset (snapshot.py: the data Job builds it the first
+time, about 25 minutes, and later only checks it), deploys the task-owned data
+tier into a fresh namespace of the cluster (each MongoDB pod restores its
+database from the snapshot), checks what MongoDB holds (Job "seed": bench.py's
+seed, as a benchmark sample checks it), deploys the candidate's
 application tier (ROOT/hotelReservation/deploy/app.yaml, validated against the
 capacity envelope by envelope.py before anything is built), waits until every
 replica serves (Job "ready"),
@@ -48,6 +52,7 @@ TASK_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(TASK_DIR))
 
 import envelope  # noqa: E402 - the task directory is on the path now
+import snapshot  # noqa: E402
 
 MANIFEST = envelope.TASK_MANIFEST  # the data tier, the ConfigMaps and the frontend Service
 ORACLE_WORKLOAD = "/task/workload/oracle.toml"  # in the task image
@@ -58,8 +63,8 @@ SWEEP_MARGIN_SECONDS = 600
 
 FRONTEND_URL = "http://frontend:5000"
 # The application Deployments are the candidate's (envelope.App.names). They start
-# only after the seed Job has filled MongoDB: each service seeds its own test data
-# into an empty collection, and geo and recommendation load their collection at
+# only after the seed Job has checked MongoDB's restored data: each service seeds its own
+# test data into an empty collection, and geo and recommendation load their collection at
 # startup. The oracle's restart hook restarts them and the reservation cache tier;
 # MongoDB stays up, so its emptyDir keeps the data.
 RESTART_CACHES = ["memcached-reserve"]
@@ -70,19 +75,28 @@ PROBE_PATHS = [
     "/hotels?inDate=2300-01-01&outDate=2300-01-02&lat=37.7867&lon=-122.4112",
 ]
 READY_TIMEOUT_SECONDS = 300
-# Oracle pod (requests == limits): one client at a time, bursts of 8. It first
-# writes dataset.py's dataset file (about 3 s, 26 MB).
+# Oracle pod (requests == limits): one client at a time, bursts of 8. It writes
+# dataset.py's dataset file (the spec) and generates the dataset from it in memory
+# (about 3 s and 150 MB for 1.5M hotels; a hotel's full record and its nights are
+# regenerated when asked for).
 ORACLE_CPU = "2"
 ORACLE_MEMORY = "2Gi"
 ORACLE_TIMEOUT_SECONDS = 1200
 # Ready Job pod: podctl polls the API, consul and the frontend pods.
 READY_CPU = "500m"
 READY_MEMORY = "128Mi"
-# Seed Job pod: requests == limits. bench.py's seed generates the dataset (about
-# 3 s) and writes about 30 MB of documents into the six MongoDB servers concurrently.
+# Seed Job pod: requests == limits. bench.py's seed generates the dataset and checks the
+# restored servers against it (hotel-data verify: markers, counts, indexes, sampled
+# documents; about a minute).
 SEED_CPU = "4"
 SEED_MEMORY = "2Gi"
 SEED_TIMEOUT_SECONDS = 600
+# The data tier's MongoDB pods copy their snapshot before mongod starts (reservation-db:
+# about 50 GB, one to two minutes).
+DATA_TIER_TIMEOUT_SECONDS = 900
+# How long a check waits for the data snapshot: a first build takes about 25 minutes; past
+# this the check fails and the data Job keeps building for the next job.
+SNAPSHOT_WAIT_SECONDS = 2700
 # The service account of the oracle and ready Jobs: podctl reads Deployments and
 # pods and deletes pods of the namespace, nothing else. The application's pods
 # run as the namespace's default account, which may do nothing.
@@ -204,7 +218,7 @@ class Deployment:
 
     # -- lifecycle ---------------------------------------------------------
     def create(self, app: envelope.App, hotel_image: str, evaluator_image: str, digest: str,
-               artifacts: Path | None) -> None:
+               data_version: str, artifacts: Path | None) -> None:
         self.created = True  # even a half-created namespace must be deleted
         self.kube.kubectl("create", "namespace", self.name, namespaced=False)
         self.kube.kubectl(
@@ -215,13 +229,14 @@ class Deployment:
         def render(text: str) -> str:
             return text.replace("${NAMESPACE}", self.name).replace("${HOTEL_IMAGE}", hotel_image)
 
-        data_tier, services = render(MANIFEST.read_text()), render(app.text)
+        data_tier = render(snapshot.render(MANIFEST.read_text(), data_version))
+        services = render(app.text)
         log(f"deploying the data tier into namespace {self.name}")
         self.kube.kubectl("apply", "-f", "-", input_text=data_tier)
         self.kube.kubectl("apply", "-f", "-", input_text=json.dumps(evaluator_rbac(self.name)))
         self.kube.kubectl(
             "wait", "--for=condition=Available", "deployment", "-l", "backend=mongodb",
-            "--timeout=300s", timeout=330,
+            f"--timeout={DATA_TIER_TIMEOUT_SECONDS}s", timeout=DATA_TIER_TIMEOUT_SECONDS + 30,
         )
         seed_database(self, evaluator_image, digest, artifacts)
         log(f"deploying the application tier: {', '.join(app.names)}")
@@ -402,7 +417,7 @@ def oracle_job(app: envelope.App, image: str, seed: int) -> dict:
 
 
 def seed_job(image: str, digest: str) -> dict:
-    """bench.py's seed: it regenerates the dataset, checks its digest and writes MongoDB."""
+    """bench.py's seed: it regenerates the dataset, checks its digest and checks MongoDB's data."""
     return job("seed", image, ["python", "/task/bench.py", "seed", "--dataset-digest", digest],
                SEED_CPU, SEED_MEMORY)
 
@@ -428,7 +443,8 @@ def do_check(project_root: Path) -> int:
     digest = dataset_digest()
     image = build_hotel_image(project_root)
     evaluator_image = build_task_image()
-    deployment.create(app, image, evaluator_image, digest, artifacts)
+    data_version = ensure_snapshot()
+    deployment.create(app, image, evaluator_image, digest, data_version, artifacts)
     log(f"running the semantic oracle (Job oracle, seed {seed})")
     deployment.kube.kubectl("apply", "-f", "-", input_text=json.dumps(oracle_job(app, evaluator_image, seed)))
     succeeded, logs = wait_job(deployment, "oracle", ORACLE_TIMEOUT_SECONDS)
@@ -437,6 +453,21 @@ def do_check(project_root: Path) -> int:
     sys.stderr.write(logs if len(logs) < 20000 else logs[:4000] + "\n...\n" + logs[-12000:])
     log("semantic oracle " + ("passed" if succeeded else "failed"))
     return 0 if succeeded else 1
+
+
+def ensure_snapshot(deadline_seconds: float = SNAPSHOT_WAIT_SECONDS) -> str:
+    """The node's data snapshot of the task's dataset, built if missing; its version."""
+    import dataset  # noqa: PLC0415 - needs vibesys-evaluator, which the task image has
+
+    try:
+        ensured = snapshot.ensure(
+            dataset.encode(dataset.generate()).decode(),
+            registry=require_env("VIBESYS_K8S_REGISTRY"), builder=require_env("VIBESYS_K8S_BUILDER"),
+            deadline_seconds=deadline_seconds, log=log,
+        )
+    except snapshot.SnapshotError as error:
+        raise JobError(str(error)) from None
+    return ensured.version
 
 
 def artifacts_dir() -> Path | None:
@@ -461,8 +492,8 @@ def wait_job(deployment: Deployment, name: str, timeout: float) -> tuple[bool, s
 
 
 def seed_database(deployment: Deployment, image: str, digest: str, artifacts: Path | None) -> None:
-    """Write the task's dataset into the namespace's MongoDB servers (Job "seed")."""
-    log("seeding MongoDB with the task's dataset: starting Job seed")
+    """Check the namespace's MongoDB servers hold the task's dataset (Job "seed")."""
+    log("checking MongoDB's restored data: starting Job seed")
     started = time.monotonic()
     deployment.kube.kubectl("apply", "-f", "-", input_text=json.dumps(seed_job(image, digest)))
     succeeded, logs = wait_job(deployment, "seed", SEED_TIMEOUT_SECONDS + 60)
@@ -470,13 +501,14 @@ def seed_database(deployment: Deployment, image: str, digest: str, artifacts: Pa
         (artifacts / "seed.log").write_text(logs)
     if not succeeded:
         raise JobError(f"Job seed failed; log tail:\n{logs[-1500:]}")
-    log(f"seeded dataset {digest[:16]} in {time.monotonic() - started:.0f}s:\n" + logs.strip()[-1500:])
+    log(f"MongoDB holds dataset {digest[:16]} (checked in {time.monotonic() - started:.0f}s):\n" + logs.strip()[-1500:])
 
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("check").add_argument("--project-root", type=Path, required=True)
+    sub.add_parser("data")
     sub.add_parser("sweep")
     args = parser.parse_args(argv)
 
@@ -500,6 +532,9 @@ def main(argv: list[str]) -> int:
             return 0
         require_env("VIBESYS_K8S_REGISTRY")
         require_env("VIBESYS_K8S_BUILDER")
+        if args.command == "data":
+            log(f"data snapshot {ensure_snapshot(snapshot.JOB_DEADLINE_SECONDS)} is ready")
+            return 0
         return do_check(args.project_root.resolve())
     except (JobError, envelope.EnvelopeError) as error:
         log(f"failed: {error}")

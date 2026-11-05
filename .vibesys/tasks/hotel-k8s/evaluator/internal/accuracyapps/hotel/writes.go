@@ -534,8 +534,10 @@ func (w *writeChecks) probeRooms(ctx context.Context, hotelID string, night [2]s
 	return nil
 }
 
+// maxReserved is the most rooms reserved on one night of the hotel: by the seeded bookings or
+// by this check's reservations.
 func (w *writeChecks) maxReserved(hotelID string) int {
-	most := 0
+	most := w.state.SeededMaxRooms(hotelID)
 	for key, rooms := range w.reserved {
 		if len(key) > len(hotelID) && key[:len(hotelID)+1] == hotelID+"/" && rooms > most {
 			most = rooms
@@ -864,10 +866,10 @@ func addHotelRequest(hotel *dataset.Hotel) api.HTTPRequestSpec {
 // stated statuses and change nothing.
 func (w *writeChecks) verifyWriteValidation(ctx context.Context) error {
 	reference := w.state.Reference()
-	hotel := &reference.Data.Hotels[w.random.Intn(len(reference.Data.Hotels))]
+	hotel := reference.Data.Hotel(w.random.Intn(reference.Data.HotelCount()))
 	key := hotelsupport.PlanKey{HotelID: hotel.ID, Code: hotel.RatePlans[0].Code}
 	prices := pricesOf(hotel.RatePlans[0])
-	unknown := strconv.Itoa(1_000_000 + w.random.Intn(1_000_000))
+	unknown := strconv.Itoa(reference.Data.HotelCount() + 1 + w.random.Intn(1_000_000))
 	cases := []struct {
 		spec   api.HTTPRequestSpec
 		status int

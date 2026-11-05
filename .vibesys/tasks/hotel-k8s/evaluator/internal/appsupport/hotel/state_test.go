@@ -21,13 +21,13 @@ func sortedCopy(ids []string) string {
 func TestAddedPointsJoinTheGeoIndex(t *testing.T) {
 	reference := DefaultReference()
 	random := rand.New(rand.NewSource(3))
-	points := make([]geoPoint, 0, len(reference.Data.Hotels)+8)
-	for _, hotel := range reference.Data.Hotels {
+	points := make([]geoPoint, 0, reference.Data.HotelCount()+8)
+	for _, hotel := range allHotels(reference.Data) {
 		points = append(points, geoPoint{id: hotel.ID, lat: hotel.Lat, lon: hotel.Lon})
 	}
 	var added []*dataset.Hotel
 	for n := 0; n < 8; n++ {
-		anchor := reference.Data.Hotels[random.Intn(len(reference.Data.Hotels))]
+		anchor := reference.Data.Hotel(random.Intn(reference.Data.HotelCount()))
 		hotel := dataset.AddedHotel(dataset.AddedHotelID(1, n), uint64(n), anchor.Lat+0.0007, anchor.Lon-0.0004)
 		added = append(added, &hotel)
 		points = append(points, geoPoint{id: hotel.ID, lat: hotel.Lat, lon: hotel.Lon})
@@ -57,7 +57,7 @@ func TestAddedPointsJoinTheGeoIndex(t *testing.T) {
 func TestStateAppliesWrites(t *testing.T) {
 	reference := DefaultReference()
 	state := NewState(reference)
-	seeded := &reference.Data.Hotels[41]
+	seeded := reference.Data.Hotel(41)
 
 	if err := state.SetProfile(seeded.ID, "", "+1 555"); err != nil {
 		t.Fatal(err)

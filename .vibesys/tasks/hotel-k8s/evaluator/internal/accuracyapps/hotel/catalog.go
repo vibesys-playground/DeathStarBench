@@ -2,10 +2,12 @@ package hotel
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"sync"
 
 	hotelsupport "vibesys/hotel-k8s-evaluator/internal/appsupport/hotel"
+	"vibesys/hotel-k8s-evaluator/internal/dataset"
 )
 
 // profile is what the frontend returns for one hotel: the profile service's
@@ -18,52 +20,78 @@ type profile struct {
 	recommendLon    float64
 }
 
-// seedProfiles builds the catalog from the task's dataset, which the seed
-// Job writes into every database before the services start.
-func seedProfiles() (map[string]profile, error) {
-	data := hotelsupport.DefaultReference().Data
-	catalog := make(map[string]profile, len(data.Hotels))
-	for _, hotel := range data.Hotels {
-		catalog[hotel.ID] = profile{
-			id: hotel.ID, name: hotel.Name, phone: hotel.Phone,
-			lat: float32(hotel.Lat), lon: float32(hotel.Lon),
-			recommendLat: hotel.Lat, recommendLon: hotel.Lon,
-		}
+// catalog is the seeded profiles, generated per hotel on demand from the task's dataset (the
+// snapshot the data tier restores before the services start): at the task's scale a map of
+// every profile would not fit the oracle's pod.
+type catalog struct{ reference *hotelsupport.Reference }
+
+// get is the profile of a seeded hotel ID, or false.
+func (c catalog) get(id string) (profile, bool) {
+	hotel, ok := c.reference.Hotel(id)
+	if !ok {
+		return profile{}, false
 	}
-	if len(catalog) != len(data.Hotels) || len(catalog) == 0 {
-		return nil, fmt.Errorf("Hotel seed catalog has %d profiles for %d hotels", len(catalog), len(data.Hotels))
-	}
-	return catalog, nil
+	return profile{
+		id: hotel.ID, name: hotel.Name, phone: hotel.Phone,
+		lat: float32(hotel.Lat), lon: float32(hotel.Lon),
+		recommendLat: hotel.Lat, recommendLon: hotel.Lon,
+	}, true
 }
+
+// at is the profile of a seeded hotel ID (the zero profile for any other).
+func (c catalog) at(id string) profile {
+	p, _ := c.get(id)
+	return p
+}
+
+// size is the number of seeded hotels.
+func (c catalog) size() int { return c.reference.Data.HotelCount() }
+
+// seedProfiles is the catalog of the task's dataset.
+func seedProfiles() (catalog, error) {
+	c := catalog{reference: hotelsupport.DefaultReference()}
+	if c.size() == 0 {
+		return catalog{}, fmt.Errorf("Hotel seed catalog is empty")
+	}
+	return c, nil
+}
+
+// searchableSample is how many hotels sortedRateBackedIDs tries.
+const searchableSample = 20_000
 
 var (
 	searchableOnce sync.Once
 	searchable     []string
 )
 
-// sortedRateBackedIDs returns, in ID order, the hotels with rate plans whose
+// sortedRateBackedIDs returns, in ID order, a spread sample of the hotels with rate plans whose
 // own location gives an unambiguous search that contains them: the hotels a
 // check can fill and then observe through search at their coordinates.
 func sortedRateBackedIDs() []string {
 	searchableOnce.Do(func() {
 		reference := hotelsupport.DefaultReference()
-		for _, hotel := range reference.Data.Hotels {
-			if len(hotel.RatePlans) == 0 {
+		data := reference.Data
+		// A spread sample of the hotels is enough: the checks use a few hundred.
+		step := max(1, data.HotelCount()/searchableSample)
+		for index := 0; index < data.HotelCount(); index += step {
+			if data.PlanCount(index) == 0 {
 				continue
 			}
-			lat := strconv.FormatFloat(hotel.Lat, 'f', -1, 64)
-			lon := strconv.FormatFloat(hotel.Lon, 'f', -1, 64)
+			hotelLat, hotelLon := data.Location(index)
+			lat := strconv.FormatFloat(hotelLat, 'f', -1, 64)
+			lon := strconv.FormatFloat(hotelLon, 'f', -1, 64)
 			ids, exact, err := reference.SearchCandidates(lat, lon)
 			if err != nil || !exact {
 				continue
 			}
 			for _, id := range ids {
-				if id == hotel.ID {
-					searchable = append(searchable, hotel.ID)
+				if id == dataset.HotelID(index) {
+					searchable = append(searchable, id)
 					break
 				}
 			}
 		}
+		sort.Strings(searchable)
 	})
 	return append([]string(nil), searchable...)
 }
