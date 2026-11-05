@@ -1,12 +1,16 @@
 [[objective]]
 name = "operations_per_second"
 direction = "max"
-relative_noise = 0.05   # measured spread 1.6-3.7% across base runs
+# v2 base, fresh seeds per sample, closed loop 2 x 60 s: CV 4.7% over 3 samples
+# (j23); 2 x 20 s gave 5.7% (j22). Revisit once the base has more samples.
+relative_noise = 0.06
 
 [[objective]]
 name = "latency_ms.p99"
 direction = "min"
-relative_noise = 0.10   # measured spread 7.7% with 3 x 60 s open-loop trials
+# v2 base, open loop 3 x 60 s at 70% of the sample's own throughput: CV 3.5%
+# (j22) and 15.2% (j23) over 3 samples each; pooled about 11%.
+relative_noise = 0.12
 
 [pareto]
-relative_noise = 0.10
+relative_noise = 0.12
