@@ -6,6 +6,9 @@
 //	podctl [flags] restart one|all   replace one / every pod of each Deployment,
 //	                                 then wait as ready does
 //
+// With --registered-auto, a Deployment whose pods register in consul (any pod
+// at ready, or before the restart) must have every pod registered.
+//
 // The oracle appends the mode to the hook command ["podctl", flags..., "restart"].
 // Exit status 0 means done; anything else is a failure, explained on stderr.
 package main
@@ -54,6 +57,7 @@ func run(args []string) error {
 	namespace := flags.String("namespace", "", "namespace (default: the pod's own)")
 	deployments := flags.String("deployments", "", "comma-separated Deployments to act on")
 	registered := flags.String("registered", "", "comma-separated Deployments whose pods register in consul")
+	registeredAuto := flags.Bool("registered-auto", false, "a Deployment with any pod in consul must have every pod there")
 	consul := flags.String("consul", "http://consul:8500", "consul agent URL")
 	probed := flags.String("probed", "", "comma-separated Deployments whose pods are probed over HTTP")
 	probePort := flags.Int("probe-port", 5000, "port of the probed pods")
@@ -73,7 +77,7 @@ func run(args []string) error {
 		return err
 	}
 	controller := &podctl.Controller{
-		Kube: kube, Deployments: splitList(*deployments), Registered: splitList(*registered),
+		Kube: kube, Deployments: splitList(*deployments), Registered: splitList(*registered), RegisteredAuto: *registeredAuto,
 		ConsulURL: *consul, Probed: splitList(*probed), ProbePort: *probePort, ProbePaths: probePaths,
 		Grace: *grace, Timeout: *timeout, Log: os.Stderr,
 	}

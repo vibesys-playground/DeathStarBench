@@ -41,7 +41,13 @@ type Controller struct {
 	// Registered Deployments register every pod in consul (at its pod IP)
 	// before it serves gRPC; their pods serve once ConsulURL lists the pod.
 	Registered []string
-	ConsulURL  string
+	// RegisteredAuto treats a Deployment as Registered when any of its pods is
+	// listed in consul: by Ready, at each check; by Restart, before it deletes
+	// pods, so that replacements must register as the pods they replace did.
+	// A Deployment none of whose pods registers is not required to (a merged
+	// service registers only the names it serves, or none when nothing calls it).
+	RegisteredAuto bool
+	ConsulURL      string
 	// Probed Deployments serve HTTP on ProbePort; their pods serve once
 	// every ProbePaths answers 200 at the pod's IP.
 	Probed     []string
@@ -101,7 +107,7 @@ func (c *Controller) Ready(ctx context.Context) error {
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
 	started := time.Now()
-	if err := c.waitAll(ctx, nil); err != nil {
+	if err := c.waitAll(ctx, nil, nil); err != nil {
 		return err
 	}
 	c.logf("ready after %.1fs", time.Since(started).Seconds())
@@ -116,6 +122,14 @@ func (c *Controller) Restart(ctx context.Context, mode Mode) error {
 	defer cancel()
 	started := time.Now()
 	replaced := map[string]map[string]bool{} // deployment -> deleted pod UIDs
+	registering := map[string]bool{}         // deployment -> its pods registered before
+	var addresses map[string]bool
+	if c.RegisteredAuto {
+		var err error
+		if addresses, err = c.consulAddresses(ctx); err != nil {
+			return err
+		}
+	}
 	for _, name := range c.Deployments {
 		deployment, err := c.Kube.GetDeployment(ctx, name)
 		if err != nil {
@@ -138,6 +152,11 @@ func (c *Controller) Restart(ctx context.Context, mode Mode) error {
 		if len(victims) == 0 {
 			return fmt.Errorf("deployment %s has no pod to restart", name)
 		}
+		for _, pod := range pods {
+			if !pod.Terminating && addresses[pod.IP] {
+				registering[name] = true
+			}
+		}
 		replaced[name] = map[string]bool{}
 		for _, pod := range victims {
 			if err := c.Kube.DeletePod(ctx, pod.Name, c.Grace); err != nil {
@@ -147,22 +166,23 @@ func (c *Controller) Restart(ctx context.Context, mode Mode) error {
 			c.logf("restart %s: deleted %s/%s (%s) of %d", mode, name, pod.Name, pod.IP, deployment.Replicas)
 		}
 	}
-	if err := c.waitAll(ctx, replaced); err != nil {
+	if err := c.waitAll(ctx, replaced, registering); err != nil {
 		return err
 	}
 	c.logf("restart %s: every deployment serves again after %.1fs", mode, time.Since(started).Seconds())
 	return nil
 }
 
-// waitAll waits for every Deployment concurrently.
-func (c *Controller) waitAll(ctx context.Context, replaced map[string]map[string]bool) error {
+// waitAll waits for every Deployment concurrently; registering names the
+// Deployments whose pods must all be in consul (beyond Registered).
+func (c *Controller) waitAll(ctx context.Context, replaced map[string]map[string]bool, registering map[string]bool) error {
 	var wg sync.WaitGroup
 	errs := make([]error, len(c.Deployments))
 	for index, name := range c.Deployments {
 		wg.Add(1)
 		go func(index int, name string) {
 			defer wg.Done()
-			errs[index] = c.waitServing(ctx, name, replaced[name])
+			errs[index] = c.waitServing(ctx, name, replaced[name], registering[name])
 		}(index, name)
 	}
 	wg.Wait()
@@ -179,14 +199,14 @@ func (c *Controller) waitAll(ctx context.Context, replaced map[string]map[string
 }
 
 // waitServing polls until Serving reports the Deployment serving.
-func (c *Controller) waitServing(ctx context.Context, name string, replaced map[string]bool) error {
+func (c *Controller) waitServing(ctx context.Context, name string, replaced map[string]bool, registering bool) error {
 	poll := c.Poll
 	if poll <= 0 {
 		poll = 500 * time.Millisecond
 	}
 	last := "not checked"
 	for {
-		pods, why, err := c.Serving(ctx, name, replaced)
+		pods, why, err := c.Serving(ctx, name, replaced, registering)
 		if err == nil && why == "" {
 			names := make([]string, 0, len(pods))
 			for _, pod := range pods {
@@ -213,11 +233,12 @@ func (c *Controller) waitServing(ctx context.Context, name string, replaced map[
 }
 
 // Serving reports whether a Deployment serves: exactly its replica count of
-// pods exist, none terminating or in replaced, all Ready; a Registered
-// Deployment's pods are listed in consul at their IPs; a Probed
-// Deployment's pods answer every probe path with 200. It returns the pods,
-// and why it does not serve ("" when it does).
-func (c *Controller) Serving(ctx context.Context, name string, replaced map[string]bool) ([]Pod, string, error) {
+// pods exist, none terminating or in replaced, all Ready; the pods of a
+// Registered Deployment (or a registering one, or with RegisteredAuto one with
+// any pod in consul) are listed in consul at their IPs; a Probed Deployment's
+// pods answer every probe path with 200. It returns the pods, and why it does
+// not serve ("" when it does).
+func (c *Controller) Serving(ctx context.Context, name string, replaced map[string]bool, registering bool) ([]Pod, string, error) {
 	deployment, err := c.Kube.GetDeployment(ctx, name)
 	if err != nil {
 		return nil, "", err
@@ -239,13 +260,17 @@ func (c *Controller) Serving(ctx context.Context, name string, replaced map[stri
 			return pods, fmt.Sprintf("pod %s is not ready", pod.Name), nil
 		}
 	}
-	if contains(c.Registered, name) {
+	registering = registering || contains(c.Registered, name)
+	if registering || c.RegisteredAuto {
 		addresses, err := c.consulAddresses(ctx)
 		if err != nil {
 			return pods, "", err
 		}
 		for _, pod := range pods {
-			if !addresses[pod.IP] {
+			registering = registering || addresses[pod.IP] // RegisteredAuto: any pod in consul
+		}
+		for _, pod := range pods {
+			if registering && !addresses[pod.IP] {
 				return pods, fmt.Sprintf("pod %s (%s) is not registered in consul", pod.Name, pod.IP), nil
 			}
 		}
