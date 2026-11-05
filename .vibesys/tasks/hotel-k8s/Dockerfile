@@ -9,7 +9,7 @@
 # module: hotel-correctness (the semantic oracle) and podctl (pod restarts and readiness).
 # The oracle builds against the servicebench accuracy framework of an older vibesys commit.
 
-ARG VIBESYS_COMMIT=1543c44534f91e23b703adae34b3f749fd107d72
+ARG VIBESYS_COMMIT=02173d5185024a2ad50dcbd82bd89411c0a623f9
 ARG ORACLE_VIBESYS_COMMIT=de037943cb6a8e6e73d00e8bc19fa53570558583
 ARG KUBECTL_VERSION=v1.34.0
 ARG KUBECTL_SHA256=cfda68cba5848bc3b6c6135ae2f20ba2c78de20059f68789c090166d6abc3e2c
