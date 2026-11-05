@@ -150,7 +150,7 @@ func (a *Application) Check(
 			return err
 		}
 	}
-	lifecycle := check.Crash != nil && check.Start != nil
+	lifecycle := a.hasLifecycle(check)
 	if lifecycle {
 		if err := a.verifyLifecycle(ctx, c, check, random, recorder); err != nil {
 			return err
@@ -164,7 +164,9 @@ func (a *Application) Check(
 func (a *Application) verifyLifecycle(
 	ctx context.Context, c client, check api.AccuracyContext, random *rand.Rand, recorder api.AccuracyRecorder,
 ) error {
-	checks, err := a.verifyCrashRecovery(ctx, c, check.Seed, random, check.Crash, check.Start)
+	// A crash takes every instance down, like a whole-candidate crash.
+	all := a.hooks(check, RestartAll)
+	checks, err := a.verifyCrashRecovery(ctx, c, check.Seed, random, all.crash, all.start)
 	recorder.AddChecks(checks)
 	if err != nil {
 		return err
@@ -173,8 +175,10 @@ func (a *Application) verifyLifecycle(
 		return err
 	}
 
+	// Acknowledged reservations survive a restart of single instances.
+	one := a.hooks(check, RestartOne)
 	checks, err = a.verifyDurableState(
-		ctx, c, check.Seed, check.Cases, random, check.Crash, check.Start, a.strict.DurableAvailability,
+		ctx, c, check.Seed, check.Cases, random, one.crash, one.start, a.strict.DurableAvailability,
 	)
 	recorder.AddChecks(checks)
 	if err != nil {

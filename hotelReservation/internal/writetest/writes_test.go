@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -61,6 +62,9 @@ func setup(t *testing.T) (*mongo.Client, *memcache.Client, *memcfake.Server) {
 	unique("geo-db", "geo", "hotelId")
 	unique("recommendation-db", "recommendation", "hotelId")
 	unique("reservation-db", "number", "hotelId")
+	if err := reservation.EnsureIndexes(ctx, client.Database("reservation-db")); err != nil {
+		t.Fatal(err)
+	}
 	insert := func(database, collection string, documents ...interface{}) {
 		if _, err := client.Database(database).Collection(collection).InsertMany(ctx, documents); err != nil {
 			t.Fatal(err)
@@ -295,5 +299,78 @@ func TestAdditionsReachEveryReplica(t *testing.T) {
 	}
 	if nearby, _ := late.Nearby(ctx, &geopb.Request{Lat: 10, Lon: 20}); len(nearby.HotelIds) != 2 {
 		t.Fatalf("restarted replica answers %v", nearby.HotelIds)
+	}
+}
+
+// Two reservation replicas over one MongoDB and memcached: concurrent
+// reservations of the same nights never oversell, and every acknowledged
+// room is counted by availability and by capacity changes.
+func TestConcurrentReservationsAcrossReplicas(t *testing.T) {
+	mongoClient, memc, _ := setup(t)
+	ctx := context.Background()
+	replicas := []*reservation.Server{
+		{MongoClient: mongoClient, MemcClient: memc},
+		{MongoClient: mongoClient, MemcClient: memc},
+	}
+	const capacity = 10 // hotel 1, see setup
+	type stay struct{ in, out string }
+	stays := []stay{{"3000-02-01", "3000-02-02"}, {"3000-02-02", "3000-02-03"}, {"3000-02-01", "3000-02-03"}}
+	var mu sync.Mutex
+	booked := map[string]int{} // night -> rooms acknowledged
+	var wg sync.WaitGroup
+	for request := 0; request < 60; request++ {
+		wg.Add(1)
+		go func(request int) {
+			defer wg.Done()
+			s := stays[request%len(stays)]
+			result, err := replicas[request%2].MakeReservation(ctx, &respb.Request{
+				CustomerName: "c", HotelId: []string{"1"}, InDate: s.in, OutDate: s.out, RoomNumber: 1,
+			})
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if len(result.HotelId) == 1 {
+				mu.Lock()
+				booked[s.in]++
+				if s.out == "3000-02-03" && s.in == "3000-02-01" {
+					booked["3000-02-02"]++
+				}
+				mu.Unlock()
+			}
+		}(request)
+	}
+	wg.Wait()
+	for _, night := range []string{"3000-02-01", "3000-02-02"} {
+		if booked[night] > capacity {
+			t.Fatalf("night %s: %d rooms acknowledged, capacity %d", night, booked[night], capacity)
+		}
+	}
+	if booked["3000-02-01"] != capacity && booked["3000-02-02"] != capacity {
+		t.Fatalf("neither night filled: %v", booked)
+	}
+	// What was acknowledged is what availability and capacity changes see.
+	for _, replica := range replicas {
+		for _, night := range []string{"3000-02-01", "3000-02-02"} {
+			next := map[string]string{"3000-02-01": "3000-02-02", "3000-02-02": "3000-02-03"}[night]
+			free := capacity - booked[night]
+			if free > 0 {
+				result, err := replica.CheckAvailability(ctx, &respb.Request{HotelId: []string{"1"}, InDate: night, OutDate: next, RoomNumber: int32(free)})
+				if err != nil || len(result.HotelId) != 1 {
+					t.Fatalf("night %s with %d rooms free is unavailable (%v)", night, free, err)
+				}
+			}
+			result, err := replica.CheckAvailability(ctx, &respb.Request{HotelId: []string{"1"}, InDate: night, OutDate: next, RoomNumber: int32(free + 1)})
+			if err != nil || len(result.HotelId) != 0 {
+				t.Fatalf("night %s offers %d rooms with %d free (%v)", night, free+1, free, err)
+			}
+		}
+	}
+	most := booked["3000-02-01"]
+	if booked["3000-02-02"] > most {
+		most = booked["3000-02-02"]
+	}
+	if _, err := replicas[1].SetCapacity(ctx, &respb.CapacityRequest{HotelId: "1", Rooms: int32(most - 1)}); code(err) != codes.FailedPrecondition {
+		t.Fatalf("capacity %d below %d reserved rooms: %v", most-1, most, err)
 	}
 }

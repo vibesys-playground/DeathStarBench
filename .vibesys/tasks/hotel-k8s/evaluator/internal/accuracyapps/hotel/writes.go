@@ -64,7 +64,7 @@ func (a *Application) verifyWrites(
 		steps = append(steps, struct {
 			property string
 			run      func() error
-		}{"durable_writes", func() error { return w.verifyDurableWrites(ctx, check.Crash, check.Start) }})
+		}{"durable_writes", func() error { return w.verifyDurableWrites(ctx, a.durableWriteRestarts(check)) }})
 	}
 	for _, step := range steps {
 		if err := checkContext(ctx); err != nil {
@@ -904,13 +904,30 @@ func (w *writeChecks) verifyWriteValidation(ctx context.Context) error {
 }
 
 // verifyDurableWrites restarts the stateless services and the reservation
-// cache after the writes and requires every acknowledged write to remain:
-// no restarted cache or index serves an old value, and capacities hold.
-func (w *writeChecks) verifyDurableWrites(ctx context.Context, crash, start func(context.Context) error) error {
-	if err := crash(ctx); err != nil {
+// cache after the writes, once per restart (one instance, then all), and
+// requires every acknowledged write to remain: no restarted cache or index
+// serves an old value, and capacities hold.
+func (w *writeChecks) verifyDurableWrites(ctx context.Context, restarts []restartHooks) error {
+	for round, restart := range restarts {
+		if err := w.readAfterRestart(ctx, round, restart); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// durableIncreaseNights are the fresh nights on which readAfterRestart's
+// rounds book an increased capacity (inside the write checks' range).
+var durableIncreaseNights = []int{writesOffset + 3, writesOffset + 7}
+
+func (w *writeChecks) readAfterRestart(ctx context.Context, round int, restart restartHooks) error {
+	if round >= len(durableIncreaseNights) {
+		return fmt.Errorf("durable_writes has nights for %d restarts", len(durableIncreaseNights))
+	}
+	if err := restart.crash(ctx); err != nil {
 		return fmt.Errorf("crash: %w", err)
 	}
-	if err := start(ctx); err != nil {
+	if err := restart.start(ctx); err != nil {
 		return fmt.Errorf("start: %w", err)
 	}
 	for read := 0; read < repeatedReads; read++ {
@@ -949,7 +966,7 @@ func (w *writeChecks) verifyDurableWrites(ctx context.Context, crash, start func
 	// a decreased one still refuses the old rooms.
 	if increased := w.capacity.increased; increased != "" {
 		rooms, _ := w.state.Capacity(increased)
-		night := namespacedNight(w.seed, writesOffset+3)
+		night := namespacedNight(w.seed, durableIncreaseNights[round])
 		if err := w.expectReserve(ctx, increased, night, rooms, "durable-increase"); err != nil {
 			return fmt.Errorf("increased capacity after a restart: %w", err)
 		}

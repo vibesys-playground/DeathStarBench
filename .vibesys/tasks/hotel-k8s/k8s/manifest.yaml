@@ -695,7 +695,7 @@ metadata:
     service: frontend
   name: frontend
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app.kubernetes.io/name: frontend
@@ -776,7 +776,7 @@ metadata:
     service: geo
   name: geo
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app.kubernetes.io/name: geo
@@ -1492,7 +1492,7 @@ metadata:
     service: profile
   name: profile
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app.kubernetes.io/name: profile
@@ -1573,7 +1573,7 @@ metadata:
     service: rate
   name: rate
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app.kubernetes.io/name: rate
@@ -1654,7 +1654,7 @@ metadata:
     service: recommendation
   name: recommendation
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app.kubernetes.io/name: recommendation
@@ -1735,7 +1735,7 @@ metadata:
     service: reservation
   name: reservation
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app.kubernetes.io/name: reservation
@@ -1816,7 +1816,7 @@ metadata:
     service: search
   name: search
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app.kubernetes.io/name: search
@@ -1897,7 +1897,7 @@ metadata:
     service: user
   name: user
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app.kubernetes.io/name: user

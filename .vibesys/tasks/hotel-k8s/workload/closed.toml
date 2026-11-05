@@ -10,9 +10,19 @@ warmup_seconds = 10
 concurrency = 32
 timeout_seconds = 10
 repetitions = 2
+# Fixed seeds for local development only: run.py passes fresh --seed and
+# --fixture-seed to every phase of every sample (seeds.json in its artifacts),
+# the open phase's fixture seed being the closed phase's plus 1, so the two
+# phases (one namespace, reservations cannot be deleted) own disjoint fixtures.
 seed = 48
 fixture_seed = 48
 min_offered_rate_ratio = 0.95
+
+# The oracle (which runs this workload) requires a burst of concurrent
+# reservations of one night to accept exactly the rooms left; the load
+# generator ignores it.
+[application_config]
+strict_linearizable_capacity = true
 
 [[targets]]
 name = "gateway"

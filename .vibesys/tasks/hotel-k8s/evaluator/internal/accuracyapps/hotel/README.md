@@ -52,6 +52,7 @@ The default remains four required cases plus up to three randomized extras.
 | `degenerate_date_ranges` | A range enclosing no nights (`inDate == outDate`, or reversed) is acknowledged and consumes nothing. |
 | `multi_night_atomicity` | A span over a full interior night is rejected whole, and the flanking nights keep their rooms. |
 | `concurrent_isolation` | Simultaneous single-room reservations on distinct hotels all succeed and each consumes exactly one room. |
+| `linearizable_capacity` | A burst of six to eight concurrent single-room reservations of a night with k rooms left accepts exactly k (required by the task's workload, `strict_linearizable_capacity`). |
 | `crash_recovery` | A filled hotel remains full across explicit crash and start events. |
 | `durable_capacity` | Acknowledged reservations remain visible to the same model after program crash/start events. |
 
@@ -63,7 +64,9 @@ resulting capacity through the same oracle rather than a separate concurrency
 predicate.
 
 Durability programs place crash and start between acknowledged writes and
-readback calls. The managed lifecycle hooks perform the real process events;
+readback calls. The task's restart hook (`Restarter`, restart.go: one instance or all
+instances of each service, per check) or else the engine's managed lifecycle hooks
+perform the real process events;
 `hotelOracle.AfterCrash` defines which logical state must survive. Search and
 reservation readbacks are ordinary actions judged by `Step`.
 
@@ -82,7 +85,7 @@ for additions.
 | `write_profile_visibility` | A new phone (and once a new name) shows in search and distance recommendations, under the same rule. |
 | `write_capacity` | A capacity below a night's reserved rooms is 409 and changes nothing; equal is accepted; an increase and a decrease apply to the next reservations (8 probes); capacity 0 hides a hotel from search within the bound and restoring it shows it again. |
 | `write_hotel_addition` | A hotel rated above and priced below every other appears in search, the three recommendations, `/rates` and reservations within the bound; a second one next to it joins the search; a taken ID is 409 and an invalid one 400. |
-| `durable_writes` | After crash and start, every write above is served again (no restarted cache or index brings an old value back), and capacities still hold. Needs the lifecycle hooks. |
+| `durable_writes` | After a restart of one instance of each service, and again after a restart of all, every write above is served again (no restarted cache or index brings an old value back), and capacities still hold. Needs the restart hooks. |
 
 Repeated reads are the replica check: internal calls round-robin over the
 instances of a service, so 8 reads reach both instances of a two-replica
@@ -105,7 +108,7 @@ strict_endpoint_liveness = true
 
 | Property | Upstream behavior |
 | --- | --- |
-| `linearizable_capacity` | `MakeReservation` reads the room count from memcached, releases it, and writes back after the capacity test, so simultaneous requests oversell. |
+| `linearizable_capacity` | `MakeReservation` reads the room count from memcached, releases it, and writes back after the capacity test, so simultaneous requests oversell. The task's base fixes this (conditional increments in MongoDB) and its workload turns the property on. |
 | `durable_availability` | `CheckAvailability` serves availability from cached counts; its datastore miss path is unreachable, so a full hotel is advertised again once the cache tier restarts. |
 | `endpoint_liveness` | The capacity lookup calls `log.Panic` when no seeded row matches, so one request for an out-of-catalog hotel takes the reservation service down. |
 

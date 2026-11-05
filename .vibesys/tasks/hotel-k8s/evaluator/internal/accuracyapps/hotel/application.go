@@ -15,6 +15,8 @@ type Application struct {
 	seed    int64
 	catalog map[string]profile
 	strict  hotelsupport.Strictness
+	// restart, when set, is the task's restart hook (NewWithRestarter).
+	restart Restarter
 }
 
 func New(workload api.Workload) (api.AccuracyApplication, error) {

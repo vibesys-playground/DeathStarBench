@@ -15,7 +15,7 @@ const (
 	degenerateOffset          = 2700
 	multiNightOffset          = 2800
 	livenessOffset            = 2900
-	// The write checks own writesOffset .. writesOffset+8.
+	// The write checks own writesOffset .. writesOffset+8 (writes.go).
 	writesOffset = 3100
 )
 
