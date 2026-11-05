@@ -7,16 +7,16 @@ is a candidate input: the CLI versions these files as the task.
 | Path | What |
 | --- | --- |
 | `vibesys.input.toml`, `objectives.toml` | Manifest and the two Pareto objectives. |
-| `Dockerfile` | Task image (every job and every in-cluster pod of the task runs it): vibesys-evaluator (Python package, `loadgen`, kubectl 1.34, buildctl) built from vibesys commit `e7da9610dfce08c7261895df9b01bfadb3f46314` until the image is published, pymongo, and `hotel-correctness` and `podctl` built from `evaluator/` against a clone of vibesys at `de037943cb6a8e6e73d00e8bc19fa53570558583` (the servicebench accuracy framework). Base images are pinned by digest. |
-| `dataset.py` | The single owner of the data: generates it from `SEED` (see Dataset), the MongoDB documents, the values writes put in, and the reference answers of the read paths (an operation-for-operation copy of go-geoindex's approximate nearest search). |
-| `bench.py` | The benchmark, on vibesys-evaluator: system under test, seed, workload (operations, distributions, checks), `benchmark(run)` and the validity rules. |
+| `Dockerfile` | Task image (every job and every in-cluster pod of the task runs it): vibesys-evaluator (Python package, `loadgen`, kubectl 1.34, buildctl) built from the vibesys commit `VIBESYS_COMMIT` until the image is published, pymongo, and from `evaluator/`: `hotel-generator` (against the Go SDK of that same commit) and `hotel-correctness` and `podctl` (against a clone of vibesys at `ORACLE_VIBESYS_COMMIT`, the servicebench accuracy framework). Base images are pinned by digest. |
+| `dataset.py` | The single owner of the data: generates it from `SEED` (see Dataset) and the MongoDB documents. The dataset file it encodes is what the Go programs read. |
+| `bench.py` | The benchmark's orchestration, on vibesys-evaluator: system under test, seed, `prepare` (the capacity envelope), `benchmark(run)` and the validity rules. Its workload is `Generator(["hotel-generator"])`: the Go generator of `evaluator/cmd/generator`. |
 | `envelope.py` | The application tier's capacity envelope: validates the candidate's `hotelReservation/deploy/app.yaml` (see Capacity envelope) and composes the deployed manifest. Both run.py and bench.py call it before they build anything. |
 | `run.py` | Trusted wrapper of the accuracy check: `check`, `sweep`. |
-| `tests/` | `python -m unittest discover -s tests` (needs vibesys-evaluator and pymongo): `test_dataset.py` pins the documents' digest to the earlier Go seed's and the reference to the real go-geoindex's answers; `test_run.py` tests run.py's Jobs; `test_envelope.py` the validator (every rule, sums at and over the envelope, random splits) and bench.py's `prepare`; `testdata/regrouped.yaml` is a regrouped tier within the envelope. |
+| `tests/` | `python -m unittest discover -s tests` (needs vibesys-evaluator and pymongo): `test_dataset.py` pins the documents' digest to the earlier Go seed's; `test_run.py` tests run.py's Jobs; `test_envelope.py` the validator (every rule, sums at and over the envelope, random splits) and bench.py's `prepare`; `testdata/regrouped.yaml` is a regrouped tier within the envelope. |
 | `k8s/manifest.yaml` | The task's part: the data tier's 11 Deployments (labelled `tier: data`) and 12 Services, the `frontend` Service and the services' 8 ConfigMaps. |
 | `k8s/app.yaml` | The reference application tier: 8 Deployments (2 pods, 1 CPU / 2 GiB each) and the 7 gRPC Services, as the base's `hotelReservation/deploy/app.yaml` has them; used for a candidate without that file (one made before the envelope). |
 | `k8s/deployed.yaml` | Not committed: the composed manifest (`k8s/manifest.yaml` and the candidate's tier) that bench.py writes before vibesys-evaluator reads it (`k8s.App(manifest=)` names one file of the task directory). `benchmark` first re-runs bench.py from a writable copy of the task directory, where it writes this file. |
-| `evaluator/` | Go module of the accuracy check. `internal/dataset` reads dataset.py's dataset file (`--dataset` or `$HOTEL_DATASET`) and draws the oracle's own write values (`additions.go`, `vocabulary.go`). `internal/appsupport/hotel` holds `Reference`, the pinned application's read answers over the dataset (pinned against the real library by `testdata/geoindex_golden.json`, which `tests/test_dataset.py` also reads), plus topology and preflight probes. `cmd/hotel-correctness` and `internal/accuracyapps/hotel` are the semantic oracle. `cmd/podctl` (`internal/podctl`) restarts and waits for pods through the Kubernetes API from inside the namespace. Its tests need the dataset file: `python dataset.py /tmp/dataset.json; HOTEL_DATASET=/tmp/dataset.json go test ./...` (without it they skip). |
+| `evaluator/` | Go module of the benchmark's workload and the accuracy check. `cmd/generator` (`internal/hotelworkload`) is the benchmark's request generator and its checks, on the vibesys-evaluator Go SDK (`loadgen/workload`) over the oracle's model; its `TestTheStreamIsThePythonWorkloads` pins its request stream to the one the earlier Python workload wrote (`testdata/`). `internal/dataset` reads dataset.py's dataset file (`--dataset` or `$HOTEL_DATASET`) and draws the oracle's own write values (`additions.go`, `vocabulary.go`). `internal/appsupport/hotel` holds `Reference`, the pinned application's read answers over the dataset (pinned against the real library by `testdata/geoindex_golden.json`), plus topology and preflight probes. `cmd/hotel-correctness` and `internal/accuracyapps/hotel` are the semantic oracle. `cmd/podctl` (`internal/podctl`) restarts and waits for pods through the Kubernetes API from inside the namespace. Its tests need the dataset file: `python dataset.py /tmp/dataset.json; HOTEL_DATASET=/tmp/dataset.json go test ./...` (without it they skip). `go.mod` replaces the vibesys modules by the image's clones (`/src`, `/vse`); a local build points them at checkouts of the two commits with a `go.work`. |
 | `workload/oracle.toml` | The oracle's workload: targets, timeout, `strict_linearizable_capacity`. |
 
 ## What the benchmark does (bench.py, one sample)
@@ -29,9 +29,10 @@ seed Job running `seed`, the candidate's Deployments, readiness probes through `
 then runs
 `benchmark(run)`: two closed-loop phases (32 clients, 15 s warmup, 60 s; throughput = their
 median) and three open-loop phases at 0.7 x that throughput (uniform arrivals, 10 s warmup,
-60 s; p99 = their median). Each phase is a pod of the task image: it generates the phase's
-requests from the dataset and the sample's seed into a file, runs loadgen over it, then checks
-every write and 10% of the reads (the validation sample) after the window. A sample fails on any
+60 s; p99 = their median). Each phase is a pod of the task image: loadgen runs
+`hotel-generator generate`, which writes the phase's request stream from the dataset, the
+sample's seed and the earlier phases' writes for as long as loadgen reads it; after the window
+`hotel-generator check` checks every write and 10% of the reads (the validation sample). A sample fails on any
 loadgen error or failed check in a window, an operation of the mix that never completed, or an
 open loop below 95% of its rate. The sample seed is drawn per sample and recorded
 (`seeds.json`; `bench.py benchmark --seed N` replays one). Writes carry from phase to phase
@@ -125,7 +126,7 @@ draw: the MongoDB documents' digest is `7670033f...` for both (`tests/test_datas
 - 10,000 users with unique names and random 10-16 character passwords (stored as SHA-256).
 - Indexes on the services' query keys (`id`, `hotelId`, hotel+night, `username`).
 
-Requests (`bench.py`) draw from the operation's own stream: locations by city popularity
+Requests (`evaluator/internal/hotelworkload`) draw from the operation's own stream: locations by city popularity
 (Zipf, s = 1) with the hotels' spread around the centre (5 decimals; a search redraws where
 geo's own ranking ties), stays of 1-7 nights skewed short over the rate window, logins and
 reservation users by Zipf (s = 0.75) over the users, rates, reservations and writes by hotel

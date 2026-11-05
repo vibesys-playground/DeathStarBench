@@ -2,10 +2,11 @@
 
 This module is the single owner of the task's data. `generate()` builds it;
 vibesys-evaluator writes it as the sample's dataset file (`dataset.json`),
-from which the Go accuracy oracle reads it, and bench.py's seed writes
-`documents()` into MongoDB. It also holds what the workload derives from the
-data: the values writes put in (`new_phone`, `new_name`, `added_hotel`,
-`sandbox_point`) and the reference answers of the read paths (`Reference`).
+from which the Go programs read it (the benchmark's request generator and the
+accuracy oracle, evaluator/internal/dataset), and bench.py's seed writes
+`documents()` into MongoDB. What the workload derives from the data (the
+values writes put in, the reference answers of the read paths) is Go:
+evaluator/internal/dataset and internal/appsupport/hotel.
 
 Generation is a pure function of SEED and uses only IEEE-exact arithmetic
 (+, -, *, /, sqrt, rounding) on its own `Rand` streams (one per hotel, per
@@ -25,7 +26,6 @@ Hotel IDs are "1".."25000" in a random order of cities.
 
 from __future__ import annotations
 
-import bisect
 import hashlib
 import json
 import math
@@ -33,8 +33,6 @@ import struct
 import sys
 from dataclasses import asdict, dataclass, replace
 from datetime import date, timedelta
-from fractions import Fraction
-from functools import cached_property
 from pathlib import Path
 
 from vibesys_evaluator import Rand
@@ -123,10 +121,6 @@ class Dataset:
     hotels: tuple[Hotel, ...]  # hotels[i].id == str(i + 1)
     users: tuple[User, ...]
 
-    @cached_property
-    def by_id(self) -> dict[str, Hotel]:
-        return {hotel.id: hotel for hotel in self.hotels}
-
 
 # ------------------------------------------------------------------ tables
 
@@ -214,12 +208,6 @@ CITY_TABLE: tuple[CityTemplate, ...] = (
           ["Copacabana", "Ipanema", "Leblon", "Botafogo", "Centro"],
           ["Av Atlantica", "Rua Visconde de Piraja", "Av Rio Branco", "Rua Barata Ribeiro", "Av Vieira Souto"]),
 )
-
-# The hotels writes add lie in this fictional city's region (the sandbox).
-ADDITION_CITY = _city(
-    "Isla Nueva", "Pacifico", "Chile", -40, -125, "+56 32 xxx xxxx", "2xxxxxx", 140, 0.19,
-    ["the Harbour", "Playa Norte", "the Old Town", "Punta Alta", "the Marina"],
-    ["Av del Mar", "Calle Larga", "Paseo Costanera", "Calle del Faro", "Av Pacifico"])
 
 NAME_PREFIXES = (
     "Grand", "Royal", "Park", "City", "Central", "Plaza", "Metropole", "Palace", "Garden",
@@ -462,62 +450,6 @@ def cos_degrees(degrees: float) -> float:
     return total
 
 
-# ------------------------------------- values that writes put into the system
-# Not part of the seeded data: the workload's admin writes draw them.
-
-
-def new_phone(data: Dataset, hotel: Hotel, r: Rand) -> str:
-    """A phone number in the format of the hotel's city."""
-    return fill(r, data.cities[hotel.city].phone_format if hotel.city >= 0 else ADDITION_CITY.phone)
-
-
-def new_name(data: Dataset, hotel: Hotel, r: Rand) -> str:
-    """A hotel name as the generator draws them for the hotel's city."""
-    districts = data.cities[hotel.city].districts if hotel.city >= 0 else ADDITION_CITY.districts
-    prefix = NAME_PREFIXES[r.below(len(NAME_PREFIXES))]
-    suffix = NAME_SUFFIXES[r.below(len(NAME_SUFFIXES))]
-    district = districts[r.below(len(districts))]
-    if r.below(2) == 0:
-        return f"{prefix} {suffix}"
-    return f"{prefix} {district.removeprefix('the ')} {suffix}"
-
-
-def added_hotel(hotel_id: str, r: Rand, lat: float, lon: float) -> Hotel:
-    """A hotel to add at (lat, lon): a profile in the additions' city, stars, plans."""
-    return describe(r, hotel_id, -1, ADDITION_CITY, 1 + r.weighted(STAR_WEIGHTS), lat, lon)
-
-
-# The additions' region in the South Pacific, more than 1,000 km from every
-# seeded city, is cut into cells of SANDBOX_SPACING_KM. A sample puts its
-# additions within SANDBOX_RADIUS_KM of one cell's centre, so a query there
-# sees no other cell's hotels and queries near the cities see none of them.
-SANDBOX_LAT_MIN, SANDBOX_LAT_MAX = -58.0, -20.0
-SANDBOX_LON_MIN, SANDBOX_LON_MAX = -165.0, -85.0
-SANDBOX_SPACING_KM = 25.0
-SANDBOX_RADIUS_KM = 2.0
-_SANDBOX_KM_PER_LON = KM_PER_DEGREE_LAT * cos_degrees(SANDBOX_LAT_MIN)
-SANDBOX_ROWS = int((SANDBOX_LAT_MAX - SANDBOX_LAT_MIN) * KM_PER_DEGREE_LAT / SANDBOX_SPACING_KM)
-SANDBOX_COLUMNS = int((SANDBOX_LON_MAX - SANDBOX_LON_MIN) * _SANDBOX_KM_PER_LON / SANDBOX_SPACING_KM)
-SANDBOX_COUNT = SANDBOX_ROWS * SANDBOX_COLUMNS
-
-
-def sandbox(cell: int) -> tuple[float, float, float]:
-    """The centre of a cell (modulo SANDBOX_COUNT) and the length of a degree of longitude there."""
-    cell %= SANDBOX_COUNT
-    row, column = divmod(cell, SANDBOX_COLUMNS)
-    lat = SANDBOX_LAT_MIN + (row + 0.5) * SANDBOX_SPACING_KM / KM_PER_DEGREE_LAT
-    lon = SANDBOX_LON_MIN + (column + 0.5) * SANDBOX_SPACING_KM / _SANDBOX_KM_PER_LON
-    return go_round(lat, 1e6), go_round(lon, 1e6), KM_PER_DEGREE_LAT * cos_degrees(lat)
-
-
-def sandbox_point(cell: int, r: Rand) -> tuple[float, float]:
-    """A location within SANDBOX_RADIUS_KM of a cell's centre (uniform in the square, 6 decimals)."""
-    lat, lon, km_per_lon = sandbox(cell)
-    dy = (2 * r.random() - 1) * SANDBOX_RADIUS_KM / math.sqrt(2)
-    dx = (2 * r.random() - 1) * SANDBOX_RADIUS_KM / math.sqrt(2)
-    return go_round(lat + dy / KM_PER_DEGREE_LAT, 1e6), go_round(lon + dx / km_per_lon, 1e6)
-
-
 # ---------------------------------------------------------- MongoDB documents
 
 
@@ -586,218 +518,6 @@ def documents_digest(collections: list[Collection]) -> str:
         for document in collection.documents:
             digest.update(bson.encode(document))
     return digest.hexdigest()
-
-
-# ------------------------------------------------------- reference answers
-# What the pinned application returns for this dataset on the read paths whose
-# answers depend only on the data. The geo part reproduces, operation for
-# operation, github.com/hailocab/go-geoindex as services/geo uses it: a
-# PointsIndex of 0.5 km cells, asked for the 5 nearest points within 10 km,
-# approximate (it stops widening the ring of cells once it holds more than 5
-# points beyond the query's cell, ranks by an equirectangular distance and cuts
-# at the first ranked point beyond 10 km by haversine). Floating-point
-# expressions keep the library's operand order; tests/test_dataset.py checks
-# it against answers of the real library (evaluator/.../geoindex_golden.json).
-
-GEO_RESOLUTION = 500.0
-GEO_LAT_DEGREE = 111000.0
-GEO_LON_DEGREE = 85000.0
-GEO_EARTH_RADIUS = 6371000.0
-GEO_MAX_DISTANCE = 10000.0
-GEO_MAX_RESULTS = 5
-GEO_COARSE_DISTANCE = 20000.0
-
-Point = tuple[str, float, float]  # id, lat, lon
-
-
-def geo_cell(lat: float, lon: float) -> tuple[int, int]:
-    return int((90.0 + lat) * GEO_LAT_DEGREE / GEO_RESOLUTION), int((180.0 + lon) * GEO_LON_DEGREE / GEO_RESOLUTION)
-
-
-def _radians(x: float) -> float:
-    return x * math.pi / 180.0
-
-
-def geo_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """go-geoindex's haversine distance in metres."""
-    s_lat = math.sin(_radians(lat2 - lat1) / 2)
-    s_lng = math.sin(_radians(lon2 - lon1) / 2)
-    a = s_lat * s_lat + s_lng * s_lng * math.cos(_radians(lat1)) * math.cos(_radians(lat2))
-    return GEO_EARTH_RADIUS * (2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
-
-
-_LON_LENGTH: dict[int, float] = {}
-
-
-def _lon_length(lat: float) -> float:
-    """The length of a degree of longitude at the latitude truncated to a tenth of a degree."""
-    index = int(lat * 10)
-    length = _LON_LENGTH.get(index)
-    if length is None:
-        rounded = index / 10
-        length = _LON_LENGTH[index] = geo_distance(rounded, 0.0, rounded, 1.0)
-    return length
-
-
-def _rank(point: Point, lat: float, lon: float) -> float:
-    avg = (point[1] + lat) / 2.0
-    lat_len = abs(point[1] - lat) * GEO_LAT_DEGREE
-    lon_len = abs(point[2] - lon) * _lon_length(avg)
-    return lat_len * lat_len + lon_len * lon_len
-
-
-class GeoIndex:
-    def __init__(self, points: list[Point] = ()) -> None:  # type: ignore[assignment]
-        self.cells: dict[tuple[int, int], list[Point]] = {}
-        for point in points:
-            self.add(point)
-
-    def add(self, point: Point) -> None:
-        self.cells.setdefault(geo_cell(point[1], point[2]), []).append(point)
-
-    def _rect(self, out: list[Point], extra: GeoIndex | None, x0: int, x1: int, y0: int, y1: int) -> None:
-        cells = self.cells
-        for x in range(x0, x1 + 1):
-            for y in range(y0, y1 + 1):
-                found = cells.get((x, y))
-                if found:
-                    out.extend(found)
-                if extra is not None and (found := extra.cells.get((x, y))):
-                    out.extend(found)
-
-    def nearest(self, lat: float, lon: float, extra: GeoIndex | None = None) -> tuple[list[str], bool]:
-        """The IDs geo answers at (lat, lon); exact is False when the ranking ties among the first k+1."""
-        k = GEO_MAX_RESULTS
-        cx, cy = geo_cell(lat, lon)
-        nearby: list[Point] = []
-        self._rect(nearby, extra, cx, cx, cy, cy)
-        total = 0
-        d = 1
-        while d * GEO_RESOLUTION <= GEO_COARSE_DISTANCE:
-            old = len(nearby)
-            self._rect(nearby, extra, cx - d, cx + d, cy + d, cy + d)
-            self._rect(nearby, extra, cx - d, cx + d, cy - d, cy - d)
-            self._rect(nearby, extra, cx - d, cx - d, cy - d + 1, cy + d - 1)
-            self._rect(nearby, extra, cx + d, cx + d, cy - d + 1, cy + d - 1)
-            total += len(nearby) - old
-            if total > k:
-                break
-            d += 1
-        ranks = [_rank(p, lat, lon) for p in nearby]
-        order = sorted(range(len(nearby)), key=ranks.__getitem__)
-        exact = all(ranks[order[i]] != ranks[order[i - 1]] for i in range(1, min(len(order), k + 1)))
-        k = min(k, len(order))
-        for index, candidate in enumerate(order):
-            p = nearby[candidate]
-            if index == k or geo_distance(lat, lon, p[1], p[2]) > GEO_MAX_DISTANCE:
-                k = index
-                break
-        return [nearby[c][0] for c in order[:k]], exact
-
-
-def parse_search_coordinate(text: str) -> float:
-    """A coordinate as the frontend parses it: correctly rounded to float32, widened to float64."""
-    wide = float(text)
-    narrow = float32(wide)
-    if narrow == wide or not math.isfinite(narrow):
-        return narrow
-    # Rounding through float64 differs from Go's direct rounding only when the
-    # float64 lies exactly half-way between two float32 values.
-    other = _f32_neighbour(narrow, wide > narrow)
-    if (narrow + other) / 2 != wide:
-        return narrow
-    exact = Fraction(text)
-    low, high = sorted((narrow, other))
-    gap_low, gap_high = exact - Fraction(low), Fraction(high) - exact
-    if gap_low != gap_high:
-        return low if gap_low < gap_high else high
-    return low if struct.unpack("<I", struct.pack("<f", low))[0] % 2 == 0 else high
-
-
-def _f32_neighbour(value: float, up: bool) -> float:
-    bits = struct.unpack("<i", struct.pack("<f", value))[0]
-    bits += 1 if (up == (value >= 0)) else -1
-    if value == 0:
-        bits = 1 if up else -2147483647
-    return struct.unpack("<f", struct.pack("<i", bits))[0]
-
-
-def encoded_coordinate(value: float) -> float:
-    """A float32 coordinate as the frontend writes it (shortest digits) and a JSON reader reads it."""
-    narrow = struct.pack("<f", value)
-    for digits in range(1, 10):
-        text = f"{struct.unpack('<f', narrow)[0]:.{digits}g}"
-        if struct.pack("<f", float(text)) == narrow:
-            return float(text)
-    return float32(value)  # pragma: no cover - 9 digits always round-trip
-
-
-class Reference:
-    """Expected answers of the read paths of the pinned application over the dataset."""
-
-    def __init__(self, data: Dataset) -> None:
-        self.data = data
-        self.geo = GeoIndex([(h.id, h.lat, h.lon) for h in data.hotels])
-        self.by_lat = sorted(range(len(data.hotels)), key=lambda i: data.hotels[i].lat)
-        self.lats = [data.hotels[i].lat for i in self.by_lat]
-        # services/recommendation: max rate from 0.0, min price from MaxFloat64.
-        self.max_rating = max(0.0, *(h.rating for h in data.hotels))
-        self.min_price = min(sys.float_info.max, *(h.price for h in data.hotels))
-        self.best_rated = sorted(h.id for h in data.hotels if h.rating == self.max_rating)
-        self.cheapest = sorted(h.id for h in data.hotels if h.price == self.min_price)
-        self._encoded: dict[str, tuple[float, float]] = {}
-
-    def search_candidates(self, lat: str, lon: str, added: tuple[Hotel, ...] = ()) -> tuple[list[str], bool]:
-        """Geo's nearest hotels for a search location (every hotel has rate plans)."""
-        extra = GeoIndex([(h.id, h.lat, h.lon) for h in added]) if added else None
-        return self.geo.nearest(parse_search_coordinate(lat), parse_search_coordinate(lon), extra)
-
-    def nearest(self, lat: float, lon: float) -> tuple[list[str], float]:
-        """The "dis" recommendation over the seeded hotels: every hotel at the minimum distance, and it."""
-        hotels = self.data.hotels
-        start = bisect.bisect_left(self.lats, lat)
-        best = sys.float_info.max
-        ids: list[str] = []
-        low, high = start - 1, start
-        n = len(self.by_lat)
-        while low >= 0 or high < n:
-            progressed = False
-            for side in (0, 1):
-                if side == 0 and high < n:
-                    index = self.by_lat[high]
-                elif side == 1 and low >= 0:
-                    index = self.by_lat[low]
-                else:
-                    continue
-                h = hotels[index]
-                bound = GEO_EARTH_RADIUS * _radians(abs(h.lat - lat)) / 1000
-                if bound > best * (1 + 1e-9) + 1e-9:
-                    continue
-                distance = geo_distance(lat, lon, h.lat, h.lon) / 1000
-                if distance < best:
-                    best, ids = distance, [h.id]
-                elif distance == best:
-                    ids.append(h.id)
-                if side == 0:
-                    high += 1
-                else:
-                    low -= 1
-                progressed = True
-            if not progressed:
-                break
-        return ids, best
-
-    def encoded(self, hotel: Hotel) -> tuple[float, float]:
-        """(lon, lat) as GeoJSON from the frontend shows them (the profile's float32 values)."""
-        coordinates = self._encoded.get(hotel.id)
-        if coordinates is None:
-            coordinates = self._encoded[hotel.id] = (encoded_coordinate(hotel.lon), encoded_coordinate(hotel.lat))
-        return coordinates
-
-
-def recommend_distance_km(lat: float, lon: float, hotel: Hotel) -> float:
-    """The recommendation service's distance from a location to a hotel."""
-    return geo_distance(lat, lon, hotel.lat, hotel.lon) / 1000
 
 
 def encode(data: Dataset) -> bytes:
