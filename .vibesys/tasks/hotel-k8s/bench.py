@@ -120,7 +120,7 @@ PROBE_LOCATION = {"lat": "37.7867", "lon": "-122.4112"}
 # script's own directory before the package reads it (k8s.App takes one manifest file of
 # the task directory). It must be this directory, not a copy: the package starts its pods
 # with this script's path (/task/bench.py), and vibesys-cli builds the task image from
-# regular files only (no symlinks). /task is the image's own writable layer in the job.
+# regular files only (no symlinks). The Dockerfile makes k8s/ writable for the benchmark's user.
 DEPLOYED = "k8s/deployed.yaml"
 
 SYSTEM = k8s.App(
@@ -789,10 +789,16 @@ def prepare(argv: list[str], target: Path) -> envelope.App | None:
     except envelope.EnvelopeError as error:
         _ENVELOPE_ERROR.append(error)
         return None
-    target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(".tmp")
-    temporary.write_text(envelope.compose(app))
-    os.replace(temporary, target)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(envelope.compose(app))
+        os.replace(temporary, target)
+    except OSError as error:
+        raise SystemExit(
+            f"bench.py: cannot write the deployed manifest {target}: {error} "
+            "(the task image makes k8s/ writable for the benchmark's user; see the Dockerfile)"
+        ) from None
     return app
 
 

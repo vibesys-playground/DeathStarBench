@@ -51,3 +51,6 @@ COPY --from=buildkit /usr/bin/buildctl /usr/local/bin/buildctl
 # their caches under /tmp.
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/tmp KUBECACHEDIR=/tmp/.kube/cache
 COPY . /task
+# bench.py writes the composed manifest (k8s/deployed.yaml) next to itself before the
+# package reads it; vibesys-cli runs the benchmark container as the host user, not root.
+RUN chmod 1777 /task/k8s
