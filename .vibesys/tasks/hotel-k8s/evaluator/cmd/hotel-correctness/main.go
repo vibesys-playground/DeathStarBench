@@ -1,7 +1,8 @@
 // Command hotel-correctness is the task's semantic oracle: servicebench in
 // accuracy mode with the Hotel accuracy adapter. It takes servicebench's flags
-// plus one of its own:
+// plus two of its own:
 //
+//	--dataset PATH        the task's dataset file, which dataset.py writes
 //	--restart-command-json '["podctl", ..., "restart"]'
 //
 // the restart hook (see hotel.CommandRestarter): the oracle runs the command
@@ -17,6 +18,7 @@ import (
 	"strings"
 
 	"vibesys/hotel-k8s-evaluator/internal/accuracyapps/hotel"
+	"vibesys/hotel-k8s-evaluator/internal/dataset"
 	"vibesys/microservice-evaluator/composition"
 	"vibesys/microservice-evaluator/drivers/httpdriver"
 	"vibesys/microservice-evaluator/servicebenchcli"
@@ -24,29 +26,36 @@ import (
 
 var version = "dev"
 
-const restartFlag = "--restart-command-json"
+const (
+	restartFlag = "--restart-command-json"
+	datasetFlag = "--dataset"
+)
 
-// splitRestartFlag removes the task's flag from args and returns its value.
-func splitRestartFlag(args []string) (rest []string, command []string, err error) {
-	var value string
-	found := false
+// splitFlag removes one of the task's flags from args and returns its value.
+func splitFlag(args []string, flag string) (rest []string, value string, found bool, err error) {
 	for index := 0; index < len(args); index++ {
 		argument := args[index]
 		switch {
-		case argument == restartFlag || argument == "-"+strings.TrimPrefix(restartFlag, "--"):
+		case argument == flag || argument == "-"+strings.TrimPrefix(flag, "--"):
 			if index+1 >= len(args) {
-				return nil, nil, fmt.Errorf("%s needs a value", restartFlag)
+				return nil, "", false, fmt.Errorf("%s needs a value", flag)
 			}
 			value, found = args[index+1], true
 			index++
-		case strings.HasPrefix(argument, restartFlag+"="):
-			value, found = strings.TrimPrefix(argument, restartFlag+"="), true
+		case strings.HasPrefix(argument, flag+"="):
+			value, found = strings.TrimPrefix(argument, flag+"="), true
 		default:
 			rest = append(rest, argument)
 		}
 	}
-	if !found {
-		return rest, nil, nil
+	return rest, value, found, nil
+}
+
+// splitRestartFlag removes the restart flag from args and returns its command.
+func splitRestartFlag(args []string) (rest []string, command []string, err error) {
+	rest, value, found, err := splitFlag(args, restartFlag)
+	if err != nil || !found {
+		return rest, nil, err
 	}
 	if err := json.Unmarshal([]byte(value), &command); err != nil {
 		return nil, nil, fmt.Errorf("%s must be a JSON string array: %w", restartFlag, err)
@@ -55,7 +64,17 @@ func splitRestartFlag(args []string) (rest []string, command []string, err error
 }
 
 func main() {
-	args, command, err := splitRestartFlag(os.Args[1:])
+	args, file, found, err := splitFlag(os.Args[1:], datasetFlag)
+	if err == nil && found {
+		dataset.Use(file)
+	}
+	if err == nil {
+		_, err = dataset.Load()
+	}
+	var command []string
+	if err == nil {
+		args, command, err = splitRestartFlag(args)
+	}
 	if err == nil {
 		factory := hotel.New
 		if command != nil {
