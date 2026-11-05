@@ -10,6 +10,10 @@ warmup_seconds = 10
 concurrency = 32
 timeout_seconds = 10
 repetitions = 2
+# Fixed seeds for local development only: run.py passes fresh --seed and
+# --fixture-seed to every phase of every sample (seeds.json in its artifacts),
+# the open phase's fixture seed being the closed phase's plus 1, so the two
+# phases (one namespace, reservations cannot be deleted) own disjoint fixtures.
 seed = 48
 fixture_seed = 48
 min_offered_rate_ratio = 0.95
