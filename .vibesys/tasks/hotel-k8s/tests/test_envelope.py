@@ -3,6 +3,7 @@
 import copy
 import random
 import sys
+import shutil
 import tempfile
 import unittest
 from fractions import Fraction
@@ -330,8 +331,8 @@ class BenchPrepareTest(unittest.TestCase):
     def test_prepare_writes_the_deployed_manifest_or_keeps_the_violation(self):
         import bench
 
-        self.assertTrue((TASK_DIR / bench.DEPLOYED).is_symlink())
-        self.assertEqual(Path((TASK_DIR / bench.DEPLOYED).readlink()), bench.DEPLOYED_MANIFEST)
+        # The task image holds regular files only: vibesys-cli builds it without symlinks (j10).
+        self.assertFalse([p for p in TASK_DIR.rglob("*") if p.is_symlink()])
         with tempfile.TemporaryDirectory() as directory:
             root, target = Path(directory) / "repo", Path(directory) / "out" / "manifest.yaml"
             app = bench.prepare(["benchmark", "--project-root", str(root), "--vs-output", "x"], target)
@@ -352,3 +353,32 @@ class BenchPrepareTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BenchStagedTest(unittest.TestCase):
+    def test_benchmark_reruns_from_a_writable_copy_once(self):
+        import bench
+
+        with tempfile.TemporaryDirectory() as directory:
+            here = Path(directory) / "task"
+            (here / "k8s").mkdir(parents=True)
+            (here / "bench.py").write_text("# bench\n")
+            (here / "k8s" / "deployed.yaml").write_text("stale\n")
+            (here / "__pycache__").mkdir()
+            argv = ["benchmark", "--project-root", "/r", "--vs-output", "/o"]
+            for path in [here, *here.rglob("*")]:
+                path.chmod(path.stat().st_mode & ~0o222)  # the job's task directory is read-only
+            command = bench.staged(argv, here, {})
+            self.assertIsNotNone(command)
+            copy = Path(command[1]).parent
+            self.assertNotEqual(copy, here)
+            self.assertEqual(command[2:], argv)
+            self.assertEqual((copy / "bench.py").read_text(), "# bench\n")
+            self.assertFalse((copy / "k8s" / "deployed.yaml").exists())
+            self.assertFalse((copy / "__pycache__").exists())
+            (copy / "k8s" / "deployed.yaml").write_text("fresh\n")  # the copy is writable
+            for path in [here, *here.rglob("*")]:
+                path.chmod(path.stat().st_mode | 0o200)
+            shutil.rmtree(copy.parent)
+            self.assertIsNone(bench.staged(argv, here, {bench.STAGED_ENV: "1"}))
+            self.assertIsNone(bench.staged(["phase", "--work", "w"], here, {}))
