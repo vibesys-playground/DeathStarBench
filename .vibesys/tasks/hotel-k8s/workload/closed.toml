@@ -14,6 +14,12 @@ seed = 48
 fixture_seed = 48
 min_offered_rate_ratio = 0.95
 
+# The oracle (which runs this workload) requires a burst of concurrent
+# reservations of one night to accept exactly the rooms left; the load
+# generator ignores it.
+[application_config]
+strict_linearizable_capacity = true
+
 [[targets]]
 name = "gateway"
 protocol = "http"

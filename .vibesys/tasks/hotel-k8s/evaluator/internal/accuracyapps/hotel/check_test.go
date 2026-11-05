@@ -33,6 +33,10 @@ type fakeHotel struct {
 	next     int
 	// mutate, when set, corrupts one route's answer to prove the check fails.
 	mutate func(path string, ids []string) []string
+	// restarts are the restarts the check asked for; keptAlive counts
+	// requests that did not ask for a connection of their own.
+	restarts  []RestartMode
+	keptAlive int
 }
 
 // faults are candidate bugs the write checks must catch.
@@ -43,6 +47,10 @@ type faults struct {
 	staleProfiles, staleRates, staleCapacity, staleGeo bool
 	// volatile loses every write in a restart.
 	volatile bool
+	// peerCopied keeps writes only in the instances' memory: a restarted
+	// instance copies them from a running peer, so they are lost only when
+	// every instance restarts at once.
+	peerCopied bool
 	// oversell accepts a capacity below the rooms already reserved.
 	oversell bool
 }
@@ -51,10 +59,13 @@ func newFake() *fakeHotel {
 	return &fakeHotel{reserved: map[string]int{}, state: hotelsupport.NewState(hotelsupport.DefaultReference())}
 }
 
-func (f *fakeHotel) crash() {
+func (f *fakeHotel) crash() { f.restart(RestartAll) }
+
+func (f *fakeHotel) restart(mode RestartMode) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.faults.volatile {
+	f.restarts = append(f.restarts, mode)
+	if f.faults.volatile || (f.faults.peerCopied && mode == RestartAll) {
 		f.state = hotelsupport.NewState(hotelsupport.DefaultReference())
 	}
 }
@@ -85,6 +96,9 @@ func (f *fakeHotel) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if request.Header.Get("Connection") != "close" {
+		f.keptAlive++
+	}
 	replica := f.next % 2
 	f.next++
 	staleGeo := f.faults.staleGeo && replica == 1
@@ -410,7 +424,25 @@ func workload() api.Workload {
 	}
 }
 
+// runCheck runs the check with the task's restart hook (the default in the
+// cluster); runEngineCheck with the engine's whole-candidate crash and start.
 func runCheck(t *testing.T, fake *fakeHotel, seed int64) (*recorder, error) {
+	t.Helper()
+	application, err := NewWithRestarter(func(_ context.Context, mode RestartMode) error {
+		fake.restart(mode)
+		return nil
+	})(workload())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := &recorder{}
+	err = application.Check(context.Background(), handlerRuntime{fake}, api.AccuracyContext{
+		Seed: seed, Cases: 4,
+	}, result)
+	return result, err
+}
+
+func runEngineCheck(t *testing.T, fake *fakeHotel, seed int64) (*recorder, error) {
 	t.Helper()
 	application, err := New(workload())
 	if err != nil {
@@ -495,6 +527,7 @@ func TestCheckRejectsStaleReplicas(t *testing.T) {
 		"capacity cached for reservations":  {faults{staleCapacity: true}, []string{"write_capacity"}},
 		"geo and recommendation never load": {faults{staleGeo: true}, []string{"write_capacity", "write_hotel_addition"}},
 		"writes lost in a restart":          {faults{volatile: true}, []string{"durable_writes"}},
+		"writes only in instance memory":    {faults{peerCopied: true}, []string{"durable_writes"}},
 		"capacity below the reserved rooms": {faults{oversell: true}, []string{"write_capacity"}},
 	}
 	for name, test := range tests {
@@ -530,4 +563,72 @@ func TestCatalogAndSearchableHotelsComeFromTheDataset(t *testing.T) {
 		t.Fatalf("only %d of %d hotels are found by a search at their own location", len(searchable), len(data.Hotels))
 	}
 	t.Logf("%d of %d hotels are searchable at their own location", len(searchable), len(data.Hotels))
+}
+
+// The check asks for the restarts each lifecycle check documents, sends
+// every request on a connection of its own, and passes with the engine's
+// lifecycle too.
+func TestRestartModesAndConnections(t *testing.T) {
+	fake := newFake()
+	if _, err := runCheck(t, fake, 48); err != nil {
+		t.Fatal(err)
+	}
+	// crash_recovery, durable_capacity, durable_writes (one, then all).
+	want := []RestartMode{RestartAll, RestartOne, RestartOne, RestartAll}
+	if !slices.Equal(fake.restarts, want) {
+		t.Fatalf("restarts %v, want %v", fake.restarts, want)
+	}
+	if fake.keptAlive != 0 {
+		t.Fatalf("%d requests did not ask for their own connection", fake.keptAlive)
+	}
+	engine := newFake()
+	result, err := runEngineCheck(t, engine, 48)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(result.passed, "durable_writes") || len(engine.restarts) != 3 {
+		t.Fatalf("engine lifecycle: passed %v after %d restarts", result.passed, len(engine.restarts))
+	}
+}
+
+func TestCommandRestarter(t *testing.T) {
+	var log strings.Builder
+	restart, err := CommandRestarter([]string{"sh", "-c", `echo "restarting $1"; test "$1" = one`, "hook"}, &log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restart(context.Background(), RestartOne); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(log.String(), "restarting one") {
+		t.Fatalf("log %q", log.String())
+	}
+	if err := restart(context.Background(), RestartAll); err == nil || !strings.Contains(err.Error(), "restarting all") {
+		t.Fatalf("failing hook: %v", err)
+	}
+	if _, err := CommandRestarter(nil, nil); err == nil {
+		t.Fatal("accepted an empty command")
+	}
+}
+
+// The task's workload asks for linearizable capacity (the base reserves with
+// a conditional increment); a serializable candidate passes it.
+func TestLinearizableCapacityOnRequest(t *testing.T) {
+	strict := workload()
+	strict.ApplicationConfig = map[string]any{"strict_linearizable_capacity": true}
+	fake := newFake()
+	application, err := NewWithRestarter(func(_ context.Context, mode RestartMode) error {
+		fake.restart(mode)
+		return nil
+	})(strict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := &recorder{}
+	if err := application.Check(context.Background(), handlerRuntime{fake}, api.AccuracyContext{Seed: 9, Cases: 4}, result); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(result.passed, "linearizable_capacity") {
+		t.Fatalf("passed %v", result.passed)
+	}
 }

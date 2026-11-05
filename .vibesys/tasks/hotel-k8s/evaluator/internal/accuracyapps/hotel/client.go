@@ -23,8 +23,18 @@ func (c client) request(ctx context.Context, path string, query map[string]strin
 	return c.do(ctx, spec)
 }
 
-// do sends any request, such as a POST with a body.
+// do sends any request, such as a POST with a body. Every request asks for
+// its own connection ("Connection: close"): a load balancer in front of the
+// frontend instances (kube-proxy picks a backend per connection) then
+// spreads the oracle's reads, and the repeated reads of a check reach every
+// frontend instance, not only the one a kept-alive connection is pinned to.
 func (c client) do(ctx context.Context, spec api.HTTPRequestSpec) api.ProtocolResult {
+	headers := make(map[string]string, len(spec.Headers)+1)
+	for key, value := range spec.Headers {
+		headers[key] = value
+	}
+	headers["Connection"] = "close"
+	spec.Headers = headers
 	requestContext, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	return c.runtime.Invoke(requestContext, api.Invocation{
