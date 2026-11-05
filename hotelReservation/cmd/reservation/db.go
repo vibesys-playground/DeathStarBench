@@ -76,6 +76,12 @@ func initializeDatabase(url string) (*mongo.Client, func()) {
 		if err != nil {
 			log.Fatal().Msg(err.Error())
 		}
+		// The rooms the test reservations take, as MakeReservation counts them.
+		_, err = database.Collection("nights").InsertOne(context.TODO(),
+			bson.D{{Key: "hotelId", Value: "4"}, {Key: "night", Value: "2015-04-09"}, {Key: "rooms", Value: 1}})
+		if err != nil {
+			log.Fatal().Msg(err.Error())
+		}
 
 		_, err = numCollection.InsertMany(context.TODO(), newNumbers)
 		if err != nil {

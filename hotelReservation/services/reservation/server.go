@@ -19,6 +19,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/keepalive"
@@ -47,6 +48,10 @@ func (s *Server) Run() error {
 
 	if s.Port == 0 {
 		return fmt.Errorf("server port must be set")
+	}
+
+	if err := EnsureIndexes(context.Background(), s.MongoClient.Database("reservation-db")); err != nil {
+		return fmt.Errorf("create the night counts' index: %v", err)
 	}
 
 	s.uuid = uuid.New().String()
@@ -92,13 +97,21 @@ func (s *Server) Shutdown() {
 	s.Registry.Deregister(s.uuid)
 }
 
-// MakeReservation makes a reservation based on given information
+// MakeReservation reserves req.RoomNumber rooms of the hotel on every night
+// of the stay, or none. The rooms taken per hotel and night are counted in
+// MongoDB (collection "nights", one document per hotel and night), and a
+// night is taken by a conditional increment that matches only while the
+// night has room: replicas and concurrent requests can never oversell, since
+// MongoDB applies each increment atomically. A stay that does not fit on some
+// night gives back the nights it took. The cached counts of the nights are
+// invalidated after the increments, before the answer.
 func (s *Server) MakeReservation(ctx context.Context, req *pb.Request) (*pb.Result, error) {
 	res := new(pb.Result)
 	res.HotelId = make([]string, 0)
 
 	database := s.MongoClient.Database("reservation-db")
 	resCollection := database.Collection("reservation")
+	nightCollection := database.Collection("nights")
 	numCollection := database.Collection("number")
 
 	inDate, _ := time.Parse(
@@ -109,122 +122,164 @@ func (s *Server) MakeReservation(ctx context.Context, req *pb.Request) (*pb.Resu
 		time.RFC3339,
 		req.OutDate+"T12:00:00+00:00")
 	hotelId := req.HotelId[0]
+	rooms := int(req.RoomNumber)
 
-	indate := inDate.String()[0:10]
+	// The nights of the stay: their first days, and their count keys in
+	// memcached (keyed by the day after, as CheckAvailability keys them).
+	var nights, countKeys []string
+	for day := inDate; day.Before(outDate); {
+		nights = append(nights, day.String()[0:10])
+		day = day.AddDate(0, 0, 1)
+		countKeys = append(countKeys, hotelId+"_"+day.String()[0:10]+"_"+day.String()[0:10])
+	}
+	if len(nights) == 0 {
+		res.HotelId = append(res.HotelId, hotelId)
+		return res, nil
+	}
 
-	memc_date_num_map := make(map[string]int)
-
-	for inDate.Before(outDate) {
-		// check reservations
-		count := 0
-		inDate = inDate.AddDate(0, 0, 1)
-		outdate := inDate.String()[0:10]
-
-		// first check memc
-		memc_key := hotelId + "_" + inDate.String()[0:10] + "_" + outdate
-		item, err := s.MemcClient.Get(memc_key)
-		if err == nil && lease.IsLease(item) {
-			err = memcache.ErrCacheMiss // another request is filling it
+	// check memc capacity
+	memc_cap_key := hotelId + "_cap"
+	item, err := s.MemcClient.Get(memc_cap_key)
+	if err == nil && lease.IsLease(item) {
+		err = memcache.ErrCacheMiss // another request is filling it
+	}
+	hotel_cap := 0
+	if err == nil {
+		// memcached hit
+		hotel_cap, _ = strconv.Atoi(string(item.Value))
+		log.Trace().Msgf("memcached hit %s = %d", memc_cap_key, hotel_cap)
+	} else if err == memcache.ErrCacheMiss {
+		// memcached miss; take the fill lease before reading MongoDB, so
+		// a capacity change between the read and the fill cannot be undone
+		fill := lease.Acquire(s.MemcClient, memc_cap_key)
+		var num number
+		err = numCollection.FindOne(context.TODO(), &bson.D{{"hotelId", hotelId}}).Decode(&num)
+		if err != nil {
+			log.Panic().Msgf("Tried to find hotelId [%v], but got error %v", hotelId, err.Error())
 		}
-		if err == nil {
-			// memcached hit
-			count, _ = strconv.Atoi(string(item.Value))
-			log.Trace().Msgf("memcached hit %s = %d", memc_key, count)
-			memc_date_num_map[memc_key] = count + int(req.RoomNumber)
+		hotel_cap = int(num.Number)
 
-		} else if err == memcache.ErrCacheMiss {
-			// memcached miss
-			log.Trace().Msgf("memcached miss")
-			var reserve []reservation
+		// write to memcache
+		fill.Fill([]byte(strconv.Itoa(hotel_cap)))
+	} else {
+		log.Panic().Msgf("Tried to get memc_cap_key [%v], but got memmcached error = %s", memc_cap_key, err)
+	}
+	if rooms > hotel_cap {
+		return res, nil
+	}
 
-			filter := bson.D{{"hotelId", hotelId}, {"inDate", indate}, {"outDate", outdate}}
-			curr, err := resCollection.Find(context.TODO(), filter)
-			if err != nil {
-				log.Error().Msgf("Failed get reservation data: %v", err)
-			}
-			curr.All(context.TODO(), &reserve)
-			if err != nil {
-				log.Panic().Msgf("Tried to find hotelId [%v] from date [%v] to date [%v], but got error %v", hotelId, indate, outdate, err.Error())
-			}
-
-			for _, r := range reserve {
-				count += r.Number
-			}
-
-			memc_date_num_map[memc_key] = count + int(req.RoomNumber)
-
-		} else {
-			log.Panic().Msgf("Tried to get memc_key [%v], but got memmcached error = %s", memc_key, err)
+	for index, night := range nights {
+		taken, err := takeRooms(ctx, nightCollection, hotelId, night, rooms, hotel_cap)
+		if err != nil {
+			log.Panic().Msgf("Tried to reserve hotel [%v] on [%v], but got error %v", hotelId, night, err)
 		}
-
-		// check capacity
-		// check memc capacity
-		memc_cap_key := hotelId + "_cap"
-		item, err = s.MemcClient.Get(memc_cap_key)
-		if err == nil && lease.IsLease(item) {
-			err = memcache.ErrCacheMiss // another request is filling it
-		}
-		hotel_cap := 0
-		if err == nil {
-			// memcached hit
-			hotel_cap, _ = strconv.Atoi(string(item.Value))
-			log.Trace().Msgf("memcached hit %s = %d", memc_cap_key, hotel_cap)
-		} else if err == memcache.ErrCacheMiss {
-			// memcached miss; take the fill lease before reading MongoDB, so
-			// a capacity change between the read and the fill cannot be undone
-			fill := lease.Acquire(s.MemcClient, memc_cap_key)
-			var num number
-			err = numCollection.FindOne(context.TODO(), &bson.D{{"hotelId", hotelId}}).Decode(&num)
-			if err != nil {
-				log.Panic().Msgf("Tried to find hotelId [%v], but got error %v", hotelId, err.Error())
+		if !taken {
+			for _, earlier := range nights[:index] {
+				if err := giveBackRooms(ctx, nightCollection, hotelId, earlier, rooms); err != nil {
+					log.Panic().Msgf("Tried to give back hotel [%v] on [%v], but got error %v", hotelId, earlier, err)
+				}
 			}
-			hotel_cap = int(num.Number)
-
-			// write to memcache
-			fill.Fill([]byte(strconv.Itoa(hotel_cap)))
-		} else {
-			log.Panic().Msgf("Tried to get memc_cap_key [%v], but got memmcached error = %s", memc_cap_key, err)
-		}
-
-		if count+int(req.RoomNumber) > hotel_cap {
+			s.invalidateCounts(countKeys[:index])
 			return res, nil
 		}
-		indate = outdate
 	}
+	s.invalidateCounts(countKeys)
 
-	// only update reservation number cache after check succeeds
-	for key, val := range memc_date_num_map {
-		s.MemcClient.Set(&memcache.Item{Key: key, Value: []byte(strconv.Itoa(val))})
-	}
-
-	inDate, _ = time.Parse(
-		time.RFC3339,
-		req.InDate+"T12:00:00+00:00")
-
-	indate = inDate.String()[0:10]
-
-	for inDate.Before(outDate) {
-		inDate = inDate.AddDate(0, 0, 1)
-		outdate := inDate.String()[0:10]
+	for index, night := range nights {
+		next := outDate.Format("2006-01-02")
+		if index+1 < len(nights) {
+			next = nights[index+1]
+		}
 		_, err := resCollection.InsertOne(
 			context.TODO(),
 			reservation{
 				HotelId:      hotelId,
 				CustomerName: req.CustomerName,
-				InDate:       indate,
-				OutDate:      outdate,
-				Number:       int(req.RoomNumber),
+				InDate:       night,
+				OutDate:      next,
+				Number:       rooms,
 			},
 		)
 		if err != nil {
 			log.Panic().Msgf("Tried to insert hotel [hotelId %v], but got error %v", hotelId, err.Error())
 		}
-		indate = outdate
 	}
 
 	res.HotelId = append(res.HotelId, hotelId)
 
 	return res, nil
+}
+
+// night counts the rooms reserved on one night of a hotel. Night is the
+// night's first day (YYYY-MM-DD), as the reservations' inDate.
+type night struct {
+	HotelId string `bson:"hotelId"`
+	Night   string `bson:"night"`
+	Rooms   int    `bson:"rooms"`
+}
+
+// EnsureIndexes creates the unique index that makes a night's count one
+// document. The service calls it at startup; it is idempotent.
+func EnsureIndexes(ctx context.Context, database *mongo.Database) error {
+	_, err := database.Collection("nights").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "hotelId", Value: 1}, {Key: "night", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	})
+	return err
+}
+
+// takeRooms adds rooms to the night's count if the count stays within
+// capacity, and reports whether it did. The increment's filter matches only
+// a count with room, so concurrent takes are serialized by MongoDB. A night
+// without a document is created with the rooms; when two requests create it
+// at once, the unique index lets one insert win and the other retries the
+// increment.
+func takeRooms(ctx context.Context, nights *mongo.Collection, hotelId, day string, rooms, capacity int) (bool, error) {
+	if rooms > capacity {
+		return false, nil
+	}
+	increment := func() (bool, error) {
+		update, err := nights.UpdateOne(ctx,
+			bson.D{{Key: "hotelId", Value: hotelId}, {Key: "night", Value: day}, {Key: "rooms", Value: bson.D{{Key: "$lte", Value: capacity - rooms}}}},
+			bson.D{{Key: "$inc", Value: bson.D{{Key: "rooms", Value: rooms}}}},
+		)
+		if err != nil {
+			return false, err
+		}
+		return update.MatchedCount == 1, nil
+	}
+	if taken, err := increment(); taken || err != nil {
+		return taken, err
+	}
+	// Either the night has no document yet or it is full.
+	_, err := nights.InsertOne(ctx, night{HotelId: hotelId, Night: day, Rooms: rooms})
+	if err == nil {
+		return true, nil
+	}
+	if !mongo.IsDuplicateKeyError(err) {
+		return false, err
+	}
+	// The document exists (documents are never deleted): the increment
+	// decides.
+	return increment()
+}
+
+// giveBackRooms undoes takeRooms for a stay that did not fit.
+func giveBackRooms(ctx context.Context, nights *mongo.Collection, hotelId, day string, rooms int) error {
+	_, err := nights.UpdateOne(ctx,
+		bson.D{{Key: "hotelId", Value: hotelId}, {Key: "night", Value: day}},
+		bson.D{{Key: "$inc", Value: bson.D{{Key: "rooms", Value: -rooms}}}},
+	)
+	return err
+}
+
+// invalidateCounts deletes cached night counts after their documents changed.
+func (s *Server) invalidateCounts(keys []string) {
+	for _, key := range keys {
+		if err := lease.Invalidate(s.MemcClient, key); err != nil {
+			log.Panic().Msgf("Tried to invalidate memc_key [%v], but got memcached error = %s", key, err)
+		}
+	}
 }
 
 // CheckAvailability returns the requested hotels that have req.RoomNumber
@@ -342,35 +397,32 @@ func (s *Server) CheckAvailability(ctx context.Context, req *pb.Request) (*pb.Re
 			check(queryItem["hotelId"], count)
 			continue
 		}
-		// memcached miss: count the night's reservations in MongoDB
+		// memcached miss: read the night's count in MongoDB
 		wg.Add(1)
 		go func(comm string, queryItem map[string]string) {
 			defer wg.Done()
 
-			// MakeReservation stores counts with Set, which also ends this
-			// lease, so an older count never replaces a newer one.
+			// MakeReservation invalidates the counts it changes, which
+			// also ends this lease, so an older count never replaces a
+			// newer one.
 			fill := lease.Acquire(s.MemcClient, comm)
-			var reserve []reservation
-			resCollection := s.MongoClient.Database("reservation-db").Collection("reservation")
-			filter := bson.D{{"hotelId", queryItem["hotelId"]}, {"inDate", queryItem["startDate"]}, {"outDate", queryItem["endDate"]}}
+			nightCollection := s.MongoClient.Database("reservation-db").Collection("nights")
+			filter := bson.D{{Key: "hotelId", Value: queryItem["hotelId"]}, {Key: "night", Value: queryItem["startDate"]}}
 
 			reserveMongoSpan, _ := opentracing.StartSpanFromContext(ctx, "mongodb_capacity_get_multi_number"+comm)
 			reserveMongoSpan.SetTag("span.kind", "client")
-			curr, err := resCollection.Find(context.TODO(), filter)
-			if err == nil {
-				err = curr.All(context.TODO(), &reserve)
+			var counted night
+			err := nightCollection.FindOne(context.TODO(), filter).Decode(&counted)
+			if err == mongo.ErrNoDocuments {
+				err = nil // nothing reserved on the night
 			}
 			reserveMongoSpan.Finish()
 			if err != nil {
 				log.Panic().Msgf("Tried to find hotelId [%v] from date [%v] to date [%v], but got error %v",
 					queryItem["hotelId"], queryItem["startDate"], queryItem["endDate"], err)
 			}
-			var count int
-			for _, r := range reserve {
-				count += r.Number
-			}
-			go fill.Fill([]byte(strconv.Itoa(count)))
-			check(queryItem["hotelId"], count)
+			go fill.Fill([]byte(strconv.Itoa(counted.Rooms)))
+			check(queryItem["hotelId"], counted.Rooms)
 		}(comm, queryItem)
 	}
 	wg.Wait()
@@ -400,14 +452,15 @@ type number struct {
 // SetCapacity sets a hotel's number of rooms in MongoDB, then invalidates
 // the cached capacity, so the next reservation uses it. A capacity below the
 // rooms already reserved on any night is rejected: a capacity change never
-// oversells. (Like reservations themselves, a change is not ordered with
-// reservations of the same hotel that run concurrently with it.)
+// oversells. (A change is not ordered with reservations of the same hotel
+// that run concurrently with it: one that read the old capacity may still
+// take rooms up to it.)
 func (s *Server) SetCapacity(ctx context.Context, req *pb.CapacityRequest) (*pb.CapacityResult, error) {
 	if req.HotelId == "" || req.Rooms < 0 {
 		return nil, status.Error(codes.InvalidArgument, "hotelId and a non-negative number of rooms are required")
 	}
 	database := s.MongoClient.Database("reservation-db")
-	maxReserved, err := maxReservedRooms(ctx, database.Collection("reservation"), req.HotelId)
+	maxReserved, err := maxReservedRooms(ctx, database.Collection("nights"), req.HotelId)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "count reservations: %v", err)
 	}
@@ -453,25 +506,13 @@ func (s *Server) AddCapacity(ctx context.Context, req *pb.CapacityRequest) (*pb.
 }
 
 // maxReservedRooms is the largest number of rooms reserved on one night of
-// the hotel (reservations are stored one document per night).
+// the hotel (the counts MakeReservation keeps).
 func maxReservedRooms(ctx context.Context, collection *mongo.Collection, hotelId string) (int, error) {
-	cursor, err := collection.Aggregate(ctx, mongo.Pipeline{
-		{{Key: "$match", Value: bson.D{{Key: "hotelId", Value: hotelId}}}},
-		{{Key: "$group", Value: bson.D{{Key: "_id", Value: "$inDate"}, {Key: "rooms", Value: bson.D{{Key: "$sum", Value: "$number"}}}}}},
-		{{Key: "$sort", Value: bson.D{{Key: "rooms", Value: -1}}}},
-		{{Key: "$limit", Value: 1}},
-	})
-	if err != nil {
-		return 0, err
-	}
-	var nights []struct {
-		Rooms int `bson:"rooms"`
-	}
-	if err := cursor.All(ctx, &nights); err != nil {
-		return 0, err
-	}
-	if len(nights) == 0 {
+	var most night
+	err := collection.FindOne(ctx, bson.D{{Key: "hotelId", Value: hotelId}},
+		options.FindOne().SetSort(bson.D{{Key: "rooms", Value: -1}})).Decode(&most)
+	if err == mongo.ErrNoDocuments {
 		return 0, nil
 	}
-	return nights[0].Rooms, nil
+	return most.Rooms, err
 }
