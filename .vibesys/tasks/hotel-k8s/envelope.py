@@ -463,7 +463,8 @@ def validate(text: str, *, source: str, task_text: str) -> App:
         if kind not in ALLOWED_KINDS:
             check.fail(where, f"{kind[1]} ({kind[0]}) not allowed: only Deployment (apps/v1), Service and ConfigMap (v1)")
             continue
-        where = f"{doc['kind']} {(doc.get('metadata') or {}).get('name')}"
+        metadata = doc.get("metadata")
+        where = f"{doc['kind']} {metadata.get('name') if isinstance(metadata, dict) else None}"
         name, _ = check.metadata(where, doc)
         if (doc["kind"], name) in seen:
             check.fail(where, "defined twice")

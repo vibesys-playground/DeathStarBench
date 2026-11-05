@@ -287,6 +287,10 @@ class ObjectRulesTest(Rejects):
         self.assertRejected(mutated(lambda d, p, c: d["metadata"].__setitem__("namespace", "kube-system")),
                             "metadata.namespace: must be ${NAMESPACE}")
 
+    def test_malformed_objects_are_reported(self):
+        docs = copy.deepcopy(REFERENCE_DOCS) + [{"apiVersion": "v1", "kind": "ConfigMap", "metadata": ["x"]}, "text"]
+        self.assertRejected(docs, "ConfigMap None: metadata: want a mapping", "document 17: not a mapping")
+
     def test_not_yaml(self):
         with self.assertRaises(envelope.EnvelopeError) as caught:
             envelope.validate("a: [", source="app.yaml", task_text=TASK_TEXT)
