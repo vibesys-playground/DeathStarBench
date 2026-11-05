@@ -34,13 +34,19 @@ func (r *rng) normal() float64 {
 	return (r.float() + r.float() + r.float() + r.float() - 2) * math.Sqrt(3)
 }
 
-// pick returns an index with probability proportional to its weight.
-func (r *rng) pick(weights []int) int {
+// Below and Random make rng a Source: intn and float.
+func (r *rng) Below(n int) int { return r.intn(n) }
+
+func (r *rng) Random() float64 { return r.float() }
+
+// pick returns an index with probability proportional to its weight: one draw below their sum,
+// walked over the weights (dataset.py's Rand.weighted of integer weights).
+func pick(r Source, weights []int) int {
 	total := 0
 	for _, weight := range weights {
 		total += weight
 	}
-	draw := r.intn(total)
+	draw := r.Below(total)
 	for index, weight := range weights {
 		if draw < weight {
 			return index

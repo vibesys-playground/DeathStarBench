@@ -26,8 +26,9 @@ const (
 	// RateWindowDays is the length of the rate window, which starts on
 	// RateWindowStart. Rate plans and canonical searches lie inside it.
 	RateWindowDays = 365
-	// kmPerDegreeLat is the length of one degree of latitude.
-	kmPerDegreeLat = 111.32
+	// KmPerDegreeLat is the length of one degree of latitude.
+	KmPerDegreeLat = 111.32
+	kmPerDegreeLat = KmPerDegreeLat
 	// PathEnv names the dataset file when Use was not called.
 	PathEnv = "HOTEL_DATASET"
 )
@@ -199,20 +200,23 @@ func (d *Dataset) check() error {
 // RateWindowEnd is the day after the last night of the rate window.
 func RateWindowEnd() time.Time { return RateWindowStart.AddDate(0, 0, RateWindowDays) }
 
-func fill(r *rng, template string) string {
+func fill(r Source, template string) string {
 	out := []byte(template)
 	for index, char := range out {
 		switch char {
 		case 'x':
-			out[index] = byte('0' + r.intn(10))
+			out[index] = byte('0' + r.Below(10))
 		case 'A':
-			out[index] = byte('A' + r.intn(26))
+			out[index] = byte('A' + r.Below(26))
 		}
 	}
 	return string(out)
 }
 
-func round(value, scale float64) float64 { return math.Round(value*scale) / scale }
+func round(value, scale float64) float64 { return Round(value, scale) }
+
+// Round is value rounded to a multiple of 1/scale, half away from zero: dataset.py's go_round.
+func Round(value, scale float64) float64 { return math.Round(value*scale) / scale }
 
 // cosDegrees is cos(degrees) by its Taylor series, so the sandbox grid does
 // not depend on the platform's math.Cos (dataset.py computes it the same way).
