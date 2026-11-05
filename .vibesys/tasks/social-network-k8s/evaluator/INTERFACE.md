@@ -1,27 +1,27 @@
-# social-network-k8s evaluator: interface for run.py
+# social-network-k8s evaluator: interface for bench.py and run.py
 
 This file is the contract between the evaluator module (this directory) and
-the task's trusted wrapper (`run.py`, the Dockerfile and the manifest). It is
+the task's trusted code (`bench.py`, `run.py`, the Dockerfile and the manifest). It is
 owned by the evaluator; any change to it is announced in the commit that makes
 it.
 
-Go module `vibesys/social-network-k8s-evaluator`. Like hotel-k8s, `go.mod`
-replaces the generic engine by a clone of the vibesys repository at the pinned
-commit (de037943c) at `/src`:
+Go module `vibesys/social-network-k8s-evaluator`. `go.mod` replaces the
+vibesys-evaluator Go SDK by the clone of the vibesys commit whose loadgen the
+task image holds (the Dockerfile's `VIBESYS_COMMIT`), at `/vse`:
 
-    replace vibesys/microservice-evaluator => /src/resources/evaluators/microservice
-    replace github.com/uw-syfi/vibesys/sdk/vs-evaluator/vseval => /src/sdk/vs-evaluator/vseval
+    replace github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen => /vse/sdk/vibesys-evaluator/loadgen
 
 Build (in the Dockerfile, `CGO_ENABLED=0`):
 
-    go build -o /out/loadgen ./cmd/loadgen
-    go build -o /out/seed    ./cmd/seed
-    go build -o /out/checker ./cmd/checker
+    go build -o /out/sn-generator ./cmd/generator
+    go build -o /out/seed         ./cmd/seed
+    go build -o /out/checker      ./cmd/checker
 
 All three are static binaries without runtime files; the dataset is generated
-in-process from the dataset seed. `loadgen` and `seed` go into the in-cluster
-evaluator image, `checker` runs where `run.py check` runs (it only needs the
-nginx URL and the restart hook).
+in-process from the dataset seed. They are on the task image's `PATH`:
+bench.py's seed runs `seed`, its phase pods run `sn-generator`, and `checker`
+runs where `run.py check` runs (it only needs the nginx URL and the restart
+hook); run.py's own seed Job runs `seed` from a busybox image.
 
 ## Application topology the evaluator assumes
 
@@ -75,36 +75,22 @@ digest) is left alone and the command succeeds; anything else is an error
      "written": [{"target": "...", "documents": N, "seconds": S}, ...],
      "skipped": false, "seconds": S}
 
-## `loadgen`: the load generator
+## `sn-generator`: the benchmark's workload
 
-`servicebenchcli.Run` with the task's Social Network adapter registered as
-application `social-network`; flags and outputs are servicebench's
-(`--mode benchmark --workload --base-url --seed --fixture-seed --rate
---startup-timeout --output-json --vs-output`), plus two task flags that are
-removed before the servicebench flags are parsed:
+`workload.Main` of the vibesys-evaluator Go SDK (`generate` and `check`, the
+SDK's generator command line), with the operations `user_timeline_read`
+(weight 500), `home_timeline_read` (400), `compose_post` (100: compose, then
+read the author's user timeline [0, 10), read your write), `follow` (5) and
+`unfollow` (5); a follow or unfollow holds its edge's exclusive key, so two
+changes of one edge never overlap. `--dataset` is the file bench.py's
+`dataset()` writes, `{"seed": N, "digest": "<sha256>"}`: the generator builds
+the dataset of that seed and refuses one of another digest.
 
-    --state-out PATH   write the adapter's write journal to PATH on exit
-    --state-in PATH    replay a journal written by an earlier phase before
-                       the first trial
-
-Why: both phases of a sample run against the same deployment. The closed
-phase composes posts and changes follow edges; the open phase must know them
-to validate exactly. run.py runs the closed phase with `--state-out`, carries
-the file (gzip, normally a few hundred KiB, at most 900 KiB; the adapter fails
-the phase rather than write more) to the open phase's Job (for example as a
-ConfigMap mounted read-only) and passes `--state-in`. A phase run without
-`--state-in` on a deployment another phase has written to fails validation.
-
-`application_config` (in the workload files): `dataset_seed` (must equal the
-seeded one; Prepare checks a sample of seeded timelines and fails fast if the
-deployment holds another dataset), `freshness_ms` (1000).
-
-`loadgen` implements the readiness probes, so `--startup-timeout` waits for
-nginx (a read of a non-dataset user, id 2999999999). Operations (all target
-`gateway`): `user_timeline_read`, `home_timeline_read`,
-`compose_post` (compose, then read the author's user timeline: read your
-write), `follow`, `unfollow`. Repetitions > 1 are allowed; the model carries
-over between trials of one process.
+`check` judges the phase's responses with the oracle (`internal/oracle`): the
+sample's earlier writes (the phase's history) and this phase's writes are
+applied first (a write whose answer is lost or failed may have taken effect at
+any later time), then each checked call in start order. Every write is
+checked, and the SDK's default share (10%) of the reads.
 
 ## `checker`: the accuracy check
 
@@ -116,6 +102,12 @@ over between trials of one process.
 Exit 0: every check passed; 1: a check failed (a failing restart hook fails
 the durability check); 2: usage or setup error (the app is unreachable). One line per check on
 stdout (`PASS name` / `FAIL name: detail`), then one JSON summary line.
+
+Each check is a program of the oracle (`internal/oracle/checks.go`: calls,
+parallel groups of calls, restarts, flushes and waits for the bound), and it
+passes when some ordering of its calls that respects their real-time order is
+a run of the oracle's model that admits every answer; a failure names the
+first step no ordering explains.
 
 The checker creates its own users (ids from 3,000,000,000 and names derived
 from the seed, far from the dataset's 1..20000), never follows or mentions dataset users, and reads the
@@ -146,7 +138,7 @@ followers stop receiving posts. Fix in the base (e.g. update the cached sets
 only if they exist, or delete them on follow/unfollow), or run with
 `--skip-follow-after-flush` until then.
 
-## The contract the checker and the benchmark validation enforce
+## The contract the oracle enforces (in the checker and the benchmark's checks)
 
 For OBJECTIVE.md; "acknowledged" means the request returned HTTP 200, the
 bound B is 1 s.
