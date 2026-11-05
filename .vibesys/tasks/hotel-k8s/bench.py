@@ -20,13 +20,10 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
 import statistics
 import sys
-import tempfile
 import threading
 import time
-from collections.abc import Mapping
 from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
@@ -119,13 +116,12 @@ PROBE_LOCATION = {"lat": "37.7867", "lon": "-122.4112"}
 
 # The deployed manifest is the task's k8s/manifest.yaml (data tier, ConfigMaps, frontend
 # Service) followed by the candidate's application tier (hotelReservation/deploy/app.yaml),
-# which `prepare` validates against the capacity envelope and writes to DEPLOYED in the task
-# directory before the package reads it (k8s.App takes one manifest file of the task
-# directory). The task directory of the job is not ours to write, and vibesys-cli builds the
-# task image from regular files only (no symlinks), so `benchmark` first re-runs this script
-# from a writable copy of the task directory (`staged`), where `prepare` writes DEPLOYED.
+# which `prepare` validates against the capacity envelope and writes to DEPLOYED in this
+# script's own directory before the package reads it (k8s.App takes one manifest file of
+# the task directory). It must be this directory, not a copy: the package starts its pods
+# with this script's path (/task/bench.py), and vibesys-cli builds the task image from
+# regular files only (no symlinks). /task is the image's own writable layer in the job.
 DEPLOYED = "k8s/deployed.yaml"
-STAGED_ENV = "HOTEL_K8S_STAGED_TASK"  # set in the re-run, so it stages only once
 
 SYSTEM = k8s.App(
     name="hotel-k8s",
@@ -775,20 +771,6 @@ def benchmark(run: vse.Run) -> None:
 _ENVELOPE_ERROR: list[envelope.EnvelopeError] = []
 
 
-def staged(argv: list[str], here: Path, environ: Mapping[str, str]) -> list[str] | None:
-    """For `benchmark`: the command that re-runs this script from a writable copy of `here`.
-
-    None for every other command, and in the re-run itself (STAGED_ENV is set).
-    """
-    if argv[:1] != ["benchmark"] or environ.get(STAGED_ENV):
-        return None
-    copy = Path(tempfile.mkdtemp(prefix="hotel-k8s-task-")) / "task"
-    shutil.copytree(here, copy, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "deployed.yaml"))
-    for path in [copy, *copy.rglob("*")]:  # copytree keeps the source's (read-only) modes
-        path.chmod(path.stat().st_mode | 0o200)
-    return [sys.executable, str(copy / "bench.py"), *argv]
-
-
 def prepare(argv: list[str], target: Path) -> envelope.App | None:
     """For `benchmark`: validate the candidate's application tier and write the deployed manifest.
 
@@ -821,12 +803,7 @@ def dataset() -> ds.Dataset:
 
 
 if __name__ == "__main__":
-    HERE = Path(__file__).resolve().parent
-    rerun = staged(sys.argv[1:], HERE, os.environ)
-    if rerun is not None:
-        os.environ[STAGED_ENV] = "1"
-        os.execv(rerun[0], rerun)
-    prepare(sys.argv[1:], HERE / DEPLOYED)
+    prepare(sys.argv[1:], Path(__file__).resolve().parent / DEPLOYED)
     vse.main(
         dataset=dataset,
         system=SYSTEM,
