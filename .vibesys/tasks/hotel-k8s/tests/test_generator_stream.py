@@ -122,6 +122,7 @@ class StreamTest(unittest.TestCase):
             tmp = Path(scratch)
             dataset = tmp / "dataset.json"
             dataset.write_bytes(dataset_file.encode(ds.generate()))
+            dataset_sha256 = hashlib.sha256(dataset.read_bytes()).hexdigest()
             python = [sys.executable, str(TASK_DIR / "bench.py")]
             golden = []
             history: list[phase_pb.HistoryEntry] = []
@@ -160,7 +161,7 @@ class StreamTest(unittest.TestCase):
                              "SHA-256 over the Go generator's frames (4-byte little-endian length, then the "
                              "frame) after the FileHeader: the RequestsHeader and the first operations; and "
                              "over its kept records of those operations",
-                    "dataset_documents_sha256": ds.documents_digest(ds.documents(ds.generate())),
+                    "dataset_sha256": dataset_sha256,
                     "phases": golden}, indent=2) + "\n")
 
 
