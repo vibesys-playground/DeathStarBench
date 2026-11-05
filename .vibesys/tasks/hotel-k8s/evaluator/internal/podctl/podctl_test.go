@@ -24,6 +24,7 @@ type fakeCluster struct {
 	pods        []*fakePod
 	next        int
 	consul      map[string]bool // registered IPs; never deregistered
+	registers   map[string]bool // deployments whose pods register once ready
 	noRegister  map[string]bool // deployments whose new pods never register
 	badProbe    map[string]bool // pod names that answer probes with 500
 	deletes     []string
@@ -39,12 +40,18 @@ type fakePod struct {
 }
 
 func newFakeCluster(t *testing.T, replicas map[string]int) *fakeCluster {
-	c := &fakeCluster{t: t, replicas: replicas, consul: map[string]bool{}, noRegister: map[string]bool{}, badProbe: map[string]bool{}, tokenOK: true}
-	for _, name := range []string{"frontend", "geo", "memcached-reserve"} {
+	return newFakeClusterOf(t, replicas, []string{"frontend", "geo", "memcached-reserve"}, map[string]bool{"geo": true})
+}
+
+// newFakeClusterOf starts the deployments in order, every pod ready, the
+// pods of the registers deployments in consul.
+func newFakeClusterOf(t *testing.T, replicas map[string]int, order []string, registers map[string]bool) *fakeCluster {
+	c := &fakeCluster{t: t, replicas: replicas, consul: map[string]bool{}, registers: registers, noRegister: map[string]bool{}, badProbe: map[string]bool{}, tokenOK: true}
+	for _, name := range order {
 		for i := 0; i < replicas[name]; i++ {
 			pod := c.addPod(name)
 			pod.readyIn = 0
-			c.consul[pod.ip] = name != "frontend" && name != "memcached-reserve"
+			c.consul[pod.ip] = registers[name]
 		}
 	}
 	return c
@@ -72,7 +79,7 @@ func (c *fakeCluster) tick() {
 		}
 		if pod.readyIn > 0 {
 			pod.readyIn--
-			if pod.readyIn == 0 && pod.deployment == "geo" && !c.noRegister[pod.deployment] {
+			if pod.readyIn == 0 && c.registers[pod.deployment] && !c.noRegister[pod.deployment] {
 				c.consul[pod.ip] = true
 			}
 		}
@@ -297,5 +304,96 @@ func TestParseModeAndSelector(t *testing.T) {
 	}
 	if got := LabelSelector(map[string]string{"b": "2", "a": "1"}); got != "a=1,b=2" {
 		t.Fatalf("selector %q", got)
+	}
+}
+
+// The candidate's own Deployments: merged groups with any names and replica
+// counts, consul registration inferred (--registered-auto).
+func autoController(t *testing.T, cluster *fakeCluster, deployments []string) *Controller {
+	controller := newController(t, cluster)
+	controller.Deployments = deployments
+	controller.Registered = nil
+	controller.RegisteredAuto = true
+	controller.Probed = []string{"web"}
+	return controller
+}
+
+func TestRestartOneOfEachCandidateDeployment(t *testing.T) {
+	replicas := map[string]int{"web": 3, "search-geo-rate": 2, "profile": 4, "memcached-reserve": 1}
+	order := []string{"web", "search-geo-rate", "profile", "memcached-reserve"}
+	cluster := newFakeClusterOf(t, replicas, order, map[string]bool{"search-geo-rate": true, "profile": true})
+	controller := autoController(t, cluster, order)
+	before := map[string]map[string]bool{}
+	for _, name := range order {
+		before[name] = cluster.live(name)
+	}
+	if err := controller.Ready(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Restart(context.Background(), One); err != nil {
+		t.Fatal(err)
+	}
+	deleted := map[string]int{}
+	for _, name := range cluster.deletes {
+		deleted[name[:strings.LastIndex(name, "-")]]++
+	}
+	for _, name := range order {
+		kept := 0
+		for uid := range cluster.live(name) {
+			if before[name][uid] {
+				kept++
+			}
+		}
+		if deleted[name] != 1 || kept != replicas[name]-1 {
+			t.Fatalf("%s: deleted %d, kept %d of %d; want one replaced while the rest serve (deletes %v)",
+				name, deleted[name], kept, replicas[name], cluster.deletes)
+		}
+	}
+	if err := controller.Restart(context.Background(), All); err != nil {
+		t.Fatal(err)
+	}
+	if len(cluster.deletes) != 4+(3+2+4+1) { // one of each, then all 10
+		t.Fatalf("restart all deleted %d pods in total, want every pod: %v", len(cluster.deletes), cluster.deletes)
+	}
+}
+
+func TestRegisteredAutoRequiresEveryPodOfARegisteringDeployment(t *testing.T) {
+	replicas := map[string]int{"web": 2, "search-geo-rate": 2}
+	order := []string{"web", "search-geo-rate"}
+	cluster := newFakeClusterOf(t, replicas, order, map[string]bool{"search-geo-rate": true})
+	controller := autoController(t, cluster, order)
+	controller.Timeout = time.Second
+	// web never registers and is not required to; search-geo-rate is.
+	if err := controller.Ready(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// One pod of a registering Deployment missing from consul: not ready.
+	cluster.mu.Lock()
+	var second string
+	for _, pod := range cluster.pods {
+		if pod.deployment == "search-geo-rate" {
+			second = pod.name
+			cluster.consul[pod.ip] = false
+			break
+		}
+	}
+	cluster.mu.Unlock()
+	if err := controller.Ready(context.Background()); err == nil || !strings.Contains(err.Error(), second) {
+		t.Fatalf("a registering Deployment with a pod missing from consul: %v", err)
+	}
+	// After restarting every pod, the replacements of a Deployment that
+	// registered must register too, even though no pod of it is in consul.
+	cluster.mu.Lock()
+	for _, pod := range cluster.pods {
+		cluster.consul[pod.ip] = cluster.registers[pod.deployment]
+	}
+	cluster.noRegister["search-geo-rate"] = true
+	cluster.mu.Unlock()
+	err := controller.Restart(context.Background(), All)
+	if err == nil || !strings.Contains(err.Error(), "search-geo-rate does not serve") || !strings.Contains(err.Error(), "not registered in consul") {
+		t.Fatalf("replacements that never register: %v", err)
+	}
+	if strings.Contains(err.Error(), "web does not serve") {
+		t.Fatalf("web never registered, so its replacements need not: %v", err)
 	}
 }

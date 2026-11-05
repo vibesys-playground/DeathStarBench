@@ -10,17 +10,23 @@ is a candidate input: the CLI versions these files as the task.
 | `Dockerfile` | Task image (every job and every in-cluster pod of the task runs it): vibesys-evaluator (Python package, `loadgen`, kubectl 1.34, buildctl) built from vibesys commit `e7da9610dfce08c7261895df9b01bfadb3f46314` until the image is published, pymongo, and `hotel-correctness` and `podctl` built from `evaluator/` against a clone of vibesys at `de037943cb6a8e6e73d00e8bc19fa53570558583` (the servicebench accuracy framework). Base images are pinned by digest. |
 | `dataset.py` | The single owner of the data: generates it from `SEED` (see Dataset), the MongoDB documents, the values writes put in, and the reference answers of the read paths (an operation-for-operation copy of go-geoindex's approximate nearest search). |
 | `bench.py` | The benchmark, on vibesys-evaluator: system under test, seed, workload (operations, distributions, checks), `benchmark(run)` and the validity rules. |
+| `envelope.py` | The application tier's capacity envelope: validates the candidate's `hotelReservation/deploy/app.yaml` (see Capacity envelope) and composes the deployed manifest. Both run.py and bench.py call it before they build anything. |
 | `run.py` | Trusted wrapper of the accuracy check: `check`, `sweep`. |
-| `tests/` | `python -m unittest discover -s tests` (needs vibesys-evaluator and pymongo): `test_dataset.py` pins the documents' digest to the earlier Go seed's and the reference to the real go-geoindex's answers; `test_run.py` tests run.py's Jobs and the manifest. |
-| `k8s/manifest.yaml` | The application: 19 Deployments (the data tier labelled `tier: data`), 19 Services, 8 ConfigMaps. |
+| `tests/` | `python -m unittest discover -s tests` (needs vibesys-evaluator and pymongo): `test_dataset.py` pins the documents' digest to the earlier Go seed's and the reference to the real go-geoindex's answers; `test_run.py` tests run.py's Jobs; `test_envelope.py` the validator (every rule, sums at and over the envelope, random splits) and bench.py's `prepare`; `testdata/regrouped.yaml` is a regrouped tier within the envelope. |
+| `k8s/manifest.yaml` | The task's part: the data tier's 11 Deployments (labelled `tier: data`) and 12 Services, the `frontend` Service and the services' 8 ConfigMaps. |
+| `k8s/app.yaml` | The reference application tier: 8 Deployments (2 pods, 1 CPU / 2 GiB each) and the 7 gRPC Services, as the base's `hotelReservation/deploy/app.yaml` has them; used for a candidate without that file (one made before the envelope). |
+| `k8s/deployed.yaml` | A symlink to `/tmp/hotel-k8s-deploy/manifest.yaml`, where bench.py writes the composed manifest (`k8s/manifest.yaml` and the candidate's tier) before vibesys-evaluator reads it: `k8s.App(manifest=)` names one file of the task directory, which is read-only in the job. |
 | `evaluator/` | Go module of the accuracy check. `internal/dataset` reads dataset.py's dataset file (`--dataset` or `$HOTEL_DATASET`) and draws the oracle's own write values (`additions.go`, `vocabulary.go`). `internal/appsupport/hotel` holds `Reference`, the pinned application's read answers over the dataset (pinned against the real library by `testdata/geoindex_golden.json`, which `tests/test_dataset.py` also reads), plus topology and preflight probes. `cmd/hotel-correctness` and `internal/accuracyapps/hotel` are the semantic oracle. `cmd/podctl` (`internal/podctl`) restarts and waits for pods through the Kubernetes API from inside the namespace. Its tests need the dataset file: `python dataset.py /tmp/dataset.json; HOTEL_DATASET=/tmp/dataset.json go test ./...` (without it they skip). |
 | `workload/oracle.toml` | The oracle's workload: targets, timeout, `strict_linearizable_capacity`. |
 
 ## What the benchmark does (bench.py, one sample)
 
-vibesys-evaluator deploys `SYSTEM` (builds `hotelReservation/` and the task image in-cluster,
-fresh namespace, the `tier=data` Deployments, the seed Job running `seed`, the eight application
-Deployments with two replicas each, readiness probes through `frontend:5000`), then runs
+bench.py first validates the candidate's application tier (`envelope.load`) and writes the
+composed manifest; a violation fails the sample before anything is built, with the validator's
+message. vibesys-evaluator then deploys `SYSTEM` (builds `hotelReservation/` and the task image
+in-cluster, fresh namespace, the `tier=data` Deployments and every Service and ConfigMap, the
+seed Job running `seed`, the candidate's Deployments, readiness probes through `frontend:5000`),
+then runs
 `benchmark(run)`: two closed-loop phases (32 clients, 15 s warmup, 60 s; throughput = their
 median) and three open-loop phases at 0.7 x that throughput (uniform arrivals, 10 s warmup,
 60 s; p99 = their median). Each phase is a pod of the task image: it generates the phase's
@@ -33,29 +39,33 @@ open loop below 95% of its rate. The sample seed is drawn per sample and recorde
 
 ## What the check does (run.py)
 
-1. Builds `hotelReservation/` and the task image with `buildctl` against `$VIBESYS_K8S_BUILDER`
+1. Validates the candidate's application tier (`envelope.load`, logged with its CPU and memory
+   split); a violation ends the check here, before any build or namespace.
+2. Builds `hotelReservation/` and the task image with `buildctl` against `$VIBESYS_K8S_BUILDER`
    and pushes them to `$VIBESYS_K8S_REGISTRY/hotel-k8s/{hotel,task}:<tree hash>`.
-2. Creates namespace `hk8s-<random>` and applies `k8s/manifest.yaml` with `${NAMESPACE}` and
-   `${HOTEL_IMAGE}` substituted, in two parts: first the data tier and configuration (ConfigMaps,
-   Services, MongoDB, memcached, consul, jaeger), and the service account `evaluator` (a Role
+3. Creates namespace `hk8s-<random>` and applies `k8s/manifest.yaml` and then the candidate's
+   tier with `${NAMESPACE}` and `${HOTEL_IMAGE}` substituted: first the data tier and
+   configuration (ConfigMaps, Services, MongoDB, memcached, consul, jaeger), and the service
+   account `evaluator` (a Role
    that may get/list/watch/delete pods and get/list Deployments of the namespace, nothing else;
    the application runs as the namespace's default account). Once the MongoDB Deployments are
    Available it runs the Job `seed` (`bench.py seed`, as a benchmark sample seeds: drop, insert,
-   indexes, count check; `seed.log`). Only then it applies the eight application Deployments
-   (two replicas each) and waits for all Deployments to be Available. The services find their
+   indexes, count check; `seed.log`). Only then it applies the candidate's tier (its
+   Deployments, Services and ConfigMaps) and waits for all Deployments to be Available. The services find their
    collections non-empty and keep them (see Base-application changes).
-3. Runs the Job `ready` (`podctl ready`, `ready.log`): every replica of every application
-   Deployment Ready, every pod of the seven gRPC services registered in consul at its pod IP
-   (`/v1/agent/services`), and every frontend pod answering `/user`, `/recommendations` and
-   `/hotels` with 200 at its own IP.
-4. Draws the oracle's seed with `secrets` (`seeds.json`) and runs the Job `oracle` (2 CPU,
+4. Runs the Job `ready` (`podctl ready`, `ready.log`): every replica of every candidate
+   Deployment Ready, every pod of a Deployment that registers in consul registered at its pod IP
+   (`/v1/agent/services`; `--registered-auto`: a Deployment registers when any of its pods is
+   listed), and every pod of the Deployments behind the `frontend` Service answering `/user`,
+   `/recommendations` and `/hotels` with 200 at its own IP.
+5. Draws the oracle's seed with `secrets` (`seeds.json`) and runs the Job `oracle` (2 CPU,
    2 GiB, `oracle.log`): `python dataset.py /tmp/dataset.json`, then
    `hotel-correctness --mode accuracy --dataset /tmp/dataset.json` against
    `http://frontend:5000`. Every oracle request asks for its own connection (`Connection: close`),
    so kube-proxy spreads the reads over both frontend pods; internal gRPC round-robins over
    consul. Its restart hook (`--restart-command-json`, see below) is `podctl ... restart`. Exit 0
    is a pass.
-5. Deletes the namespace on every exit path the process can see: normal end, error, SIGTERM,
+6. Deletes the namespace on every exit path the process can see: normal end, error, SIGTERM,
    SIGINT and SIGHUP. The CLI ends a cancelled or timed-out job with SIGKILL, which no handler
    can see, so the namespace leaks. Each namespace therefore carries labels
    `vibesys.dev/hotel-k8s=1`, `vibesys.dev/hotel-k8s-created=<epoch>` and
@@ -70,12 +80,13 @@ The engine's managed lifecycle stops a whole candidate and waits until it is unr
 a restart of one replica behind a Service never is, so the oracle takes its own hook:
 `hotel-correctness --restart-command-json '[...]'` (the flag is removed before servicebench
 parses the rest). The oracle runs the command with `one` or `all` appended; exit 0 means every
-replacement serves (as in step 3 above). `podctl restart one` deletes, with a 1 s grace period,
-the first pod by name of each of the eight application Deployments and `memcached-reserve` (its
-only pod), all at once; `podctl restart all` deletes every pod of them. Both wait until no
-deleted pod exists, each Deployment has exactly its replica count of Ready pods, the gRPC pods
-are in consul and each frontend pod passes the probes; `podctl:` lines in `oracle.log` name
-the deleted and the serving pods.
+replacement serves (as in step 4 above). `podctl restart one` deletes, with a 1 s grace period,
+the first pod by name of each of the candidate's Deployments (run.py passes their names) and of
+`memcached-reserve` (its only pod), all at once, while the other replicas serve; `podctl restart
+all` deletes every pod of them. Both wait until no deleted pod exists, each Deployment has
+exactly its replica count of Ready pods, the replacements of each Deployment whose pods were in
+consul before the restart are in consul, and each frontend pod passes the probes; `podctl:`
+lines in `oracle.log` name the deleted and the serving pods.
 
 | Check | Restart |
 | --- | --- |
@@ -167,6 +178,9 @@ instances' memory (lost only when all restart) each fails the check.
 
 These changes to `hotelReservation/` are part of the base every candidate starts from:
 
+- `deploy/app.yaml`: the application tier (moved from `k8s/manifest.yaml`, the reference
+  topology unchanged); the Dockerfile copies named directories only, so the file does not
+  change the image's build layers.
 - `cmd/*/db.go`: a service inserts its built-in test data only into an empty collection
   (reservation-db is keyed on its capacity collection).
 - `services/rate`: on a cache miss, GetRates reads the missed hotel's plans instead of the
@@ -215,14 +229,41 @@ the source of truth (reservation counts now included, above).
 | `VIBESYS_K8S_BUILDER` | BuildKit address, for example `tcp://127.0.0.1:1234`. |
 | `VIBESYS_ARTIFACTS_DIR` | Optional. Logs, phase results and the dataset file are kept there. |
 
+## Capacity envelope
+
+The candidate owns the application tier, `hotelReservation/deploy/app.yaml` (OBJECTIVE.md,
+Resources). `envelope.py` checks it before any build or deploy, collecting every violation
+into one error that names the object and key (`Deployment geo: spec.replicas: 1: at least 2`):
+
+| Rule | Where |
+| --- | --- |
+| CPU limits over every container of every replica at most 16, memory at most 32 GiB | `validate`, the `envelope` problems |
+| `requests` == `limits`, both of `cpu` and `memory` only, at least 100m and 64 MiB, whole millicores | `_Checker.resources` |
+| `replicas` an integer >= 2 | `_Checker.deployment` |
+| `GOMAXPROCS` set once: ceil(CPU limit) as a literal, or `resourceFieldRef` `limits.cpu` divisor 1 of the container itself | `_Checker.env` |
+| `image: ${HOTEL_IMAGE}` only; no variables but `${NAMESPACE}` and `${HOTEL_IMAGE}` | `_Checker.container`, `validate` |
+| kinds `Deployment` (`apps/v1`), `Service`, `ConfigMap` (`v1`); namespace `${NAMESPACE}` or absent; no `tier`/`backend` labels | `validate`, `_Checker.metadata` |
+| allowlists of Deployment, pod, container, securityContext, port, env, volume (`configMap`, `emptyDir`) and Service (`ClusterIP`, headless) fields; `affinity`, `tolerations`, `nodeSelector` empty; default service account | `*_KEYS`, `_Checker.pod`, `_Checker.service` |
+| no Deployment, Service or ConfigMap name of the task's; mounted ConfigMaps exist | `_Checker.deployment`, `_Checker.service`, `validate` |
+| selectors select their own pods only; no pod matches a task Service's selector except `frontend`'s; at least one Deployment behind `frontend` | `_Checker.deployment`, `validate` |
+
+Decisions: GOMAXPROCS is the CPU limit rounded up, because that is what the downward API
+(`limits.cpu`, divisor 1) gives and what the base uses; a candidate may also write the literal.
+Candidate ConfigMaps are allowed (a merged service may want its own configuration); Secrets,
+PVCs, PodDisruptionBudgets and StatefulSets are not. The `frontend` Service stays the task's,
+so its name, port and selector cannot change; any Deployment whose pods carry its labels serves
+it. A candidate without `app.yaml` (from before the envelope) gets `k8s/app.yaml`, the base
+topology, so its numbers are those it had.
+
 ## Resource limits
 
-Requests equal limits on every container (Guaranteed QoS). Application pods: 16 (8 services x 2),
-1 CPU, 2 GiB each. MongoDB: 2 CPU, 2 GiB each. memcached: 1 CPU, 1 GiB each. consul: 1 CPU,
-512 MiB. jaeger: 2 CPU, 1 GiB. The namespace's deployments request 34 CPUs and 48.5 GiB. Pods
-of the jobs: seed 4 CPU (before the application starts), ready/probe 0.5 CPU, oracle 2 CPU,
-phase (loadgen) 6 CPU, 4 GiB. Peak demand is 40 CPUs (benchmark) or 36 (check), on a 64-CPU node shared with other
-tasks' jobs, so two of these jobs cannot run at once.
+Requests equal limits on every container (Guaranteed QoS). Application tier: at most 16 CPUs
+and 32 GiB in total, split by the candidate (the base: 16 pods, 8 services x 2, at 1 CPU and
+2 GiB each). MongoDB: 2 CPU, 2 GiB each. memcached: 1 CPU, 1 GiB each. consul: 1 CPU,
+512 MiB. jaeger: 2 CPU, 1 GiB. The namespace's deployments request at most 34 CPUs and
+48.5 GiB. Pods of the jobs: seed 4 CPU (before the application starts), ready/probe 0.5 CPU,
+oracle 2 CPU, phase (loadgen) 6 CPU, 4 GiB. Peak demand is 40 CPUs (benchmark) or 36 (check),
+on a 64-CPU node shared with other tasks' jobs, so two of these jobs cannot run at once.
 
 ## Manifest provenance
 
@@ -231,6 +272,6 @@ tasks' jobs, so two of these jobs cannot run at once.
 `867806e575e1f7fb24437ae969910ddb17a76121`, as hand-edited in vibesys's
 `examples/microservices/hotel-correctness/.vibesys/tasks/kubernetes/manifest.yaml`, with
 these further edits: images pinned by tag and digest (consul 1.15.4, jaeger 1.57,
-memcached 1.6.7, mongo 5.0), the application image is `${HOTEL_IMAGE}`, two replicas of each application Deployment, resources as above,
+memcached 1.6.7, mongo 5.0), the application image is `${HOTEL_IMAGE}`, two replicas of each application Deployment, resources as above, the application Deployments and the gRPC Services moved to `k8s/app.yaml` (and the base's `hotelReservation/deploy/app.yaml`),
 `terminationGracePeriodSeconds: 5`, and `GOMAXPROCS` of each application container from the downward API (`limits.cpu`). Without it the base measured about 345 operations/s with 100 ms latency steps (CFS throttling: Go 1.21 sees every core of the node), with it about 925. Service configs keep stock values
 (`GC=100`, `JAEGER_SAMPLE_RATIO=0.01`).

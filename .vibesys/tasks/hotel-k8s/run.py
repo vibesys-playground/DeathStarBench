@@ -8,8 +8,10 @@ The check builds the candidate image from ROOT/hotelReservation and the task
 image (this directory: dataset.py, bench.py, hotel-correctness, podctl) with
 buildctl, pushes them to the registry, deploys the task-owned data tier into a
 fresh namespace of the cluster, seeds MongoDB with the task's dataset (Job
-"seed": bench.py's seed, as a benchmark sample seeds), deploys the application
-services (two replicas each), waits until every replica serves (Job "ready"),
+"seed": bench.py's seed, as a benchmark sample seeds), deploys the candidate's
+application tier (ROOT/hotelReservation/deploy/app.yaml, validated against the
+capacity envelope by envelope.py before anything is built), waits until every
+replica serves (Job "ready"),
 runs the semantic oracle over dataset.py's dataset file (Job "oracle") inside
 the namespace, and deletes the namespace on every exit path (normal, error,
 SIGTERM, SIGINT, SIGHUP). Only SIGKILL (which is what the CLI sends on cancel
@@ -43,7 +45,11 @@ import time
 from pathlib import Path
 
 TASK_DIR = Path(__file__).resolve().parent
-MANIFEST = TASK_DIR / "k8s" / "manifest.yaml"
+sys.path.insert(0, str(TASK_DIR))
+
+import envelope  # noqa: E402 - the task directory is on the path now
+
+MANIFEST = envelope.TASK_MANIFEST  # the data tier, the ConfigMaps and the frontend Service
 ORACLE_WORKLOAD = "/task/workload/oracle.toml"  # in the task image
 NAMESPACE_LABEL = "vibesys.dev/hotel-k8s"
 CREATED_LABEL = "vibesys.dev/hotel-k8s-created"  # epoch seconds
@@ -51,15 +57,12 @@ JOB_LABEL = "vibesys.dev/hotel-k8s-job"
 SWEEP_MARGIN_SECONDS = 600
 
 FRONTEND_URL = "http://frontend:5000"
-# The application Deployments (two replicas each). They start only after the
-# seed Job has filled MongoDB: each service seeds its own test data into an
-# empty collection, and geo and recommendation load their collection at startup.
-APP_DEPLOYMENTS = ["frontend", "geo", "profile", "rate", "recommendation", "reservation", "search", "user"]
-# The application services that register every instance in consul (gRPC).
-REGISTERED_DEPLOYMENTS = [name for name in APP_DEPLOYMENTS if name != "frontend"]
-# Deployments the oracle's restart hook restarts: the stateless services and the
-# reservation cache tier. MongoDB stays up, so its emptyDir keeps the data.
-RESTART_DEPLOYMENTS = APP_DEPLOYMENTS + ["memcached-reserve"]
+# The application Deployments are the candidate's (envelope.App.names). They start
+# only after the seed Job has filled MongoDB: each service seeds its own test data
+# into an empty collection, and geo and recommendation load their collection at
+# startup. The oracle's restart hook restarts them and the reservation cache tier;
+# MongoDB stays up, so its emptyDir keeps the data.
+RESTART_CACHES = ["memcached-reserve"]
 # Every frontend pod must answer these with 200 before the application is ready.
 PROBE_PATHS = [
     "/user?username=Cornell_30&password=0000000000",
@@ -191,27 +194,6 @@ def dataset_digest() -> str:
     return hashlib.sha256(dataset.encode(dataset.generate())).hexdigest()
 
 
-def split_manifest(manifest: str) -> tuple[str, str]:
-    """Split the rendered manifest into (data tier and config, application Deployments)."""
-    data, app = [], []
-    for document in manifest.split("\n---\n"):
-        kind = name = ""
-        in_metadata = False
-        for line in document.splitlines():
-            if line.startswith("kind:"):
-                kind = line.split(":", 1)[1].strip()
-            elif line.startswith("metadata:"):
-                in_metadata = True
-            elif in_metadata and line.startswith("  name:") and not name:
-                name = line.split(":", 1)[1].strip().strip('"')
-            elif line and not line.startswith((" ", "#")):
-                in_metadata = False
-        (app if kind == "Deployment" and name in APP_DEPLOYMENTS else data).append(document)
-    if len(app) != len(APP_DEPLOYMENTS):
-        raise JobError(f"manifest has {len(app)} of the application Deployments {APP_DEPLOYMENTS}")
-    return "\n---\n".join(data), "\n---\n".join(app)
-
-
 class Deployment:
     """A fresh namespace with the hotel application deployed in it."""
 
@@ -221,7 +203,8 @@ class Deployment:
         self.created = False
 
     # -- lifecycle ---------------------------------------------------------
-    def create(self, hotel_image: str, evaluator_image: str, digest: str, artifacts: Path | None) -> None:
+    def create(self, app: envelope.App, hotel_image: str, evaluator_image: str, digest: str,
+               artifacts: Path | None) -> None:
         self.created = True  # even a half-created namespace must be deleted
         self.kube.kubectl("create", "namespace", self.name, namespaced=False)
         self.kube.kubectl(
@@ -229,9 +212,10 @@ class Deployment:
             f"{CREATED_LABEL}={int(time.time())}", f"{JOB_LABEL}={job_label()}",
             namespaced=False,
         )
-        manifest = MANIFEST.read_text()
-        manifest = manifest.replace("${NAMESPACE}", self.name).replace("${HOTEL_IMAGE}", hotel_image)
-        data_tier, services = split_manifest(manifest)
+        def render(text: str) -> str:
+            return text.replace("${NAMESPACE}", self.name).replace("${HOTEL_IMAGE}", hotel_image)
+
+        data_tier, services = render(MANIFEST.read_text()), render(app.text)
         log(f"deploying the data tier into namespace {self.name}")
         self.kube.kubectl("apply", "-f", "-", input_text=data_tier)
         self.kube.kubectl("apply", "-f", "-", input_text=json.dumps(evaluator_rbac(self.name)))
@@ -240,19 +224,19 @@ class Deployment:
             "--timeout=300s", timeout=330,
         )
         seed_database(self, evaluator_image, digest, artifacts)
-        log("deploying the application services")
+        log(f"deploying the application tier: {', '.join(app.names)}")
         self.kube.kubectl("apply", "-f", "-", input_text=services)
         # Available needs every replica: maxUnavailable (25%) rounds down to 0.
         self.kube.kubectl(
             "wait", "--for=condition=Available", "deployment", "--all", "--timeout=300s",
             timeout=330,
         )
-        self.wait_ready(evaluator_image, artifacts)
+        self.wait_ready(app, evaluator_image, artifacts)
 
-    def wait_ready(self, image: str, artifacts: Path | None) -> None:
-        """Job "ready": every replica Ready, registered in consul, every frontend pod probed."""
+    def wait_ready(self, app: envelope.App, image: str, artifacts: Path | None) -> None:
+        """Job "ready": every replica Ready, every registering pod in consul, every frontend pod probed."""
         started = time.monotonic()
-        self.kube.kubectl("apply", "-f", "-", input_text=json.dumps(ready_job(image)))
+        self.kube.kubectl("apply", "-f", "-", input_text=json.dumps(ready_job(app, image)))
         succeeded, logs = wait_job(self, "ready", READY_TIMEOUT_SECONDS + 60)
         if artifacts:
             (artifacts / "ready.log").write_text(logs)
@@ -372,13 +356,19 @@ def job(name: str, image: str, command: list[str], cpu: str, memory: str,
     }
 
 
-def podctl_command(*action: str) -> list[str]:
-    """podctl over the application: ready, or the restart hook (the oracle appends the mode)."""
+def podctl_command(app: envelope.App, *action: str) -> list[str]:
+    """podctl over the application: ready, or the restart hook (the oracle appends the mode).
+
+    Every candidate Deployment is waited for (and restarted, with the reservation cache);
+    a Deployment whose pods register in consul must have every pod registered
+    (--registered-auto: merged services may register only what they serve, or nothing);
+    the pods of the Deployments behind the frontend Service are probed."""
+    deployments = app.names if action == ("ready",) else app.names + RESTART_CACHES
     command = [
         "podctl",
-        "--deployments", ",".join(APP_DEPLOYMENTS if action == ("ready",) else RESTART_DEPLOYMENTS),
-        "--registered", ",".join(REGISTERED_DEPLOYMENTS),
-        "--probed", "frontend", "--probe-port", "5000",
+        "--deployments", ",".join(deployments),
+        "--registered-auto",
+        "--probed", ",".join(app.frontend), "--probe-port", str(envelope.FRONTEND_PORT),
         "--timeout", f"{READY_TIMEOUT_SECONDS}s",
     ]
     for path in PROBE_PATHS:
@@ -386,16 +376,17 @@ def podctl_command(*action: str) -> list[str]:
     return command + list(action)
 
 
-def ready_job(image: str) -> dict:
-    return job("ready", image, podctl_command("ready"), READY_CPU, READY_MEMORY, EVALUATOR_ACCOUNT)
+def ready_job(app: envelope.App, image: str) -> dict:
+    return job("ready", image, podctl_command(app, "ready"), READY_CPU, READY_MEMORY, EVALUATOR_ACCOUNT)
 
 
-def oracle_job(image: str, seed: int) -> dict:
+def oracle_job(app: envelope.App, image: str, seed: int) -> dict:
     """The semantic oracle, in the namespace, against the frontend Service.
 
     Its requests each open a connection, so kube-proxy spreads them over the
-    frontend pods; its restarts go through podctl (one pod or all pods of each
-    Deployment, see the accuracy adapter's Restarter)."""
+    frontend pods; its restarts go through podctl (one pod of each candidate
+    Deployment while the others serve, or all of their pods; see the accuracy
+    adapter's Restarter)."""
     oracle = [
         "hotel-correctness", "--mode", "accuracy",
         "--dataset", "/tmp/dataset.json",
@@ -403,7 +394,7 @@ def oracle_job(image: str, seed: int) -> dict:
         "--base-url", FRONTEND_URL,
         "--seed", str(seed),
         "--startup-timeout", str(READY_TIMEOUT_SECONDS),
-        "--restart-command-json", json.dumps(podctl_command("restart")),
+        "--restart-command-json", json.dumps(podctl_command(app, "restart")),
     ]
     script = 'python /task/dataset.py /tmp/dataset.json && exec "$@"'
     return job("oracle", image, ["sh", "-c", script, "oracle", *oracle], ORACLE_CPU, ORACLE_MEMORY,
@@ -426,6 +417,8 @@ def write_seeds(artifacts: Path | None, seeds: dict) -> None:
 
 
 def do_check(project_root: Path) -> int:
+    # The envelope is checked first: a candidate outside it fails before any build or deploy.
+    app = envelope.load(project_root, log=log)
     deployment = Deployment()
     atexit.register(deployment.delete)
     sweep_stale_namespaces()
@@ -435,9 +428,9 @@ def do_check(project_root: Path) -> int:
     digest = dataset_digest()
     image = build_hotel_image(project_root)
     evaluator_image = build_task_image()
-    deployment.create(image, evaluator_image, digest, artifacts)
+    deployment.create(app, image, evaluator_image, digest, artifacts)
     log(f"running the semantic oracle (Job oracle, seed {seed})")
-    deployment.kube.kubectl("apply", "-f", "-", input_text=json.dumps(oracle_job(evaluator_image, seed)))
+    deployment.kube.kubectl("apply", "-f", "-", input_text=json.dumps(oracle_job(app, evaluator_image, seed)))
     succeeded, logs = wait_job(deployment, "oracle", ORACLE_TIMEOUT_SECONDS)
     if artifacts:
         (artifacts / "oracle.log").write_text(logs)
@@ -508,7 +501,7 @@ def main(argv: list[str]) -> int:
         require_env("VIBESYS_K8S_REGISTRY")
         require_env("VIBESYS_K8S_BUILDER")
         return do_check(args.project_root.resolve())
-    except JobError as error:
+    except (JobError, envelope.EnvelopeError) as error:
         log(f"failed: {error}")
         return 1
     finally:

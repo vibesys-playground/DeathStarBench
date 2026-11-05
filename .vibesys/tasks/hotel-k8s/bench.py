@@ -18,6 +18,8 @@ against the 1 s staleness bound of OBJECTIVE.md through `Versions`.
 
 from __future__ import annotations
 
+import argparse
+import os
 import statistics
 import sys
 import threading
@@ -29,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import dataset as ds  # noqa: E402
+import envelope  # noqa: E402
 import vibesys_evaluator as vse  # noqa: E402
 from vibesys_evaluator import Call, Rand, Versions  # noqa: E402
 from vibesys_evaluator.deploy import k8s  # noqa: E402
@@ -111,12 +114,20 @@ def seed(data: ds.Dataset) -> None:
 
 PROBE_LOCATION = {"lat": "37.7867", "lon": "-122.4112"}
 
+# The deployed manifest is the task's k8s/manifest.yaml (data tier, ConfigMaps, frontend
+# Service) followed by the candidate's application tier (hotelReservation/deploy/app.yaml),
+# which `prepare` validates against the capacity envelope and writes to DEPLOYED_MANIFEST
+# before the package reads it. k8s.App takes one manifest from the task directory, which is
+# read-only in the job, so the task directory carries DEPLOYED, a symlink to that path.
+DEPLOYED = "k8s/deployed.yaml"
+DEPLOYED_MANIFEST = Path("/tmp/hotel-k8s-deploy/manifest.yaml")
+
 SYSTEM = k8s.App(
     name="hotel-k8s",
-    manifest="k8s/manifest.yaml",  # ${NAMESPACE} and ${HOTEL_IMAGE} are substituted
+    manifest=DEPLOYED,  # ${NAMESPACE} and ${HOTEL_IMAGE} are substituted
     images={"HOTEL_IMAGE": "hotelReservation"},  # built from PROJECT_ROOT/hotelReservation
     # MongoDB, memcached, consul and jaeger: applied and available before the seed; the
-    # eight application services (two replicas each) start after it.
+    # candidate's application Deployments start after it.
     data_tier="tier=data",
     seed=seed,
     gateway="http://frontend:5000",
@@ -756,9 +767,44 @@ def benchmark(run: vse.Run) -> None:
 
 # ------------------------------------------------------------- (5) validity
 
+_ENVELOPE_ERROR: list[envelope.EnvelopeError] = []
+
+
+def prepare(argv: list[str], target: Path = DEPLOYED_MANIFEST) -> envelope.App | None:
+    """For `benchmark`: validate the candidate's application tier and write the deployed manifest.
+
+    A violation is kept and raised by `dataset()`, the first thing a sample calls inside
+    its error handling and before it builds or deploys anything, so that the sample fails
+    with the validator's message in its records.
+    """
+    if argv[:1] != ["benchmark"]:
+        return None
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--project-root", type=Path, required=True)
+    args, _ = parser.parse_known_args(argv[1:])
+    target.unlink(missing_ok=True)
+    try:
+        app = envelope.load(args.project_root.resolve(), log=lambda line: print(line, file=sys.stderr))
+    except envelope.EnvelopeError as error:
+        _ENVELOPE_ERROR.append(error)
+        return None
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(".tmp")
+    temporary.write_text(envelope.compose(app))
+    os.replace(temporary, target)
+    return app
+
+
+def dataset() -> ds.Dataset:
+    if _ENVELOPE_ERROR:
+        raise _ENVELOPE_ERROR[0]
+    return ds.generate()
+
+
 if __name__ == "__main__":
+    prepare(sys.argv[1:])
     vse.main(
-        dataset=ds.generate,
+        dataset=dataset,
         system=SYSTEM,
         workload=WORKLOAD,
         benchmark=benchmark,

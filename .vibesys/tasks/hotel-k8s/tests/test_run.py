@@ -23,6 +23,9 @@ def flag(argv: list[str], name: str) -> str:
     return argv[argv.index(name) + 1]
 
 
+REFERENCE = run.envelope.load(Path("/nonexistent"))  # the reference application tier
+
+
 class SeedTest(unittest.TestCase):
     def test_seeds_are_recorded(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -39,7 +42,7 @@ class ManifestTest(unittest.TestCase):
         self.assertFalse(job["spec"]["template"]["spec"]["automountServiceAccountToken"])
 
     def test_oracle_job(self):
-        job = run.oracle_job("registry/task:x", 987654321)
+        job = run.oracle_job(REFERENCE, "registry/task:x", 987654321)
         self.assertEqual(job["kind"], "Job")
         self.assertEqual(job["metadata"]["name"], "oracle")
         pod = job["spec"]["template"]["spec"]
@@ -60,17 +63,18 @@ class ManifestTest(unittest.TestCase):
         hook = json.loads(flag(argv, "--restart-command-json"))
         self.assertEqual(hook[0], "podctl")
         self.assertEqual(hook[-1], "restart")  # the oracle appends one or all
-        self.assertEqual(flag(hook, "--deployments").split(","), run.APP_DEPLOYMENTS + ["memcached-reserve"])
-        self.assertNotIn("frontend", flag(hook, "--registered").split(","))
+        self.assertEqual(flag(hook, "--deployments").split(","), REFERENCE.names + ["memcached-reserve"])
+        self.assertIn("--registered-auto", hook)
+        self.assertNotIn("--registered", hook)
         self.assertEqual(flag(hook, "--probed"), "frontend")
         self.assertEqual([hook[i + 1] for i, a in enumerate(hook) if a == "--probe-path"], run.PROBE_PATHS)
         # The manifest is what kubectl apply receives.
         self.assertEqual(json.loads(json.dumps(job)), job)
 
     def test_ready_job_and_account(self):
-        argv = container(run.ready_job("i"))["command"]
+        argv = container(run.ready_job(REFERENCE, "i"))["command"]
         self.assertEqual(argv[-1], "ready")
-        self.assertEqual(flag(argv, "--deployments").split(","), run.APP_DEPLOYMENTS)
+        self.assertEqual(flag(argv, "--deployments").split(","), REFERENCE.names)
         rbac = run.evaluator_rbac("hk8s-0001")
         kinds = {item["kind"]: item for item in rbac["items"]}
         self.assertEqual(set(kinds), {"ServiceAccount", "Role", "RoleBinding"})
@@ -78,15 +82,15 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(rules, {("pods",): {"get", "list", "watch", "delete"}, ("deployments",): {"get", "list"}})
         self.assertEqual(kinds["RoleBinding"]["subjects"][0]["namespace"], "hk8s-0001")
 
-    def test_manifest_has_two_replicas_of_each_application_service(self):
-        manifest = run.MANIFEST.read_text()
-        _, services = run.split_manifest(manifest)
-        documents = services.split("\n---\n")
-        self.assertEqual(len(documents), len(run.APP_DEPLOYMENTS))
-        for document in documents:
-            self.assertIn("\n  replicas: 2\n", document)
-            self.assertEqual(document.count('cpu: "1"'), 2)  # request = limit
-
+    def test_candidate_deployments_drive_podctl(self):
+        """Any grouping: every Deployment is waited for and restarted, the frontend's probed."""
+        text = (TASK_DIR / "tests" / "testdata" / "regrouped.yaml").read_text()
+        app = run.envelope.validate(text, source="regrouped.yaml", task_text=run.MANIFEST.read_text())
+        ready = container(run.ready_job(app, "i"))["command"]
+        self.assertEqual(flag(ready, "--deployments").split(","), app.names)
+        self.assertEqual(flag(ready, "--probed").split(","), list(app.frontend))
+        hook = run.podctl_command(app, "restart")
+        self.assertEqual(flag(hook, "--deployments").split(","), app.names + ["memcached-reserve"])
 
 if __name__ == "__main__":
     unittest.main()

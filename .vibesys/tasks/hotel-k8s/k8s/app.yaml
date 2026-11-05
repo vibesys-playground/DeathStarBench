@@ -1,0 +1,771 @@
+# The application tier of the reference (base) topology: eight Deployments of two pods,
+# 1 CPU and 2 GiB each (16 CPUs, 32 GiB), and the Services of the seven gRPC services.
+# The candidate owns its own copy, hotelReservation/deploy/app.yaml (OBJECTIVE.md,
+# Resources); this one is used for a candidate that has none. Moved verbatim from
+# k8s/manifest.yaml, which keeps the data tier, the ConfigMaps and the frontend Service.
+---
+# Source: hotel-reservation/charts/geo/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: geo
+spec:
+  type: ClusterIP
+  ports:
+  - name: "8083"
+    port: 8083
+    targetPort: 8083
+  selector:
+    app.kubernetes.io/name: geo
+    app.kubernetes.io/instance: hotel
+    service: geo
+
+---
+# Source: hotel-reservation/charts/profile/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: profile
+spec:
+  type: ClusterIP
+  ports:
+  - name: "8081"
+    port: 8081
+    targetPort: 8081
+  selector:
+    app.kubernetes.io/name: profile
+    app.kubernetes.io/instance: hotel
+    service: profile
+
+---
+# Source: hotel-reservation/charts/rate/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: rate
+spec:
+  type: ClusterIP
+  ports:
+  - name: "8084"
+    port: 8084
+    targetPort: 8084
+  selector:
+    app.kubernetes.io/name: rate
+    app.kubernetes.io/instance: hotel
+    service: rate
+
+---
+# Source: hotel-reservation/charts/recommendation/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: recommendation
+spec:
+  type: ClusterIP
+  ports:
+  - name: "8085"
+    port: 8085
+    targetPort: 8085
+  selector:
+    app.kubernetes.io/name: recommendation
+    app.kubernetes.io/instance: hotel
+    service: recommendation
+
+---
+# Source: hotel-reservation/charts/reservation/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: reservation
+spec:
+  type: ClusterIP
+  ports:
+  - name: "8087"
+    port: 8087
+    targetPort: 8087
+  selector:
+    app.kubernetes.io/name: reservation
+    app.kubernetes.io/instance: hotel
+    service: reservation
+
+---
+# Source: hotel-reservation/charts/search/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: search
+spec:
+  type: ClusterIP
+  ports:
+  - name: "8082"
+    port: 8082
+    targetPort: 8082
+  selector:
+    app.kubernetes.io/name: search
+    app.kubernetes.io/instance: hotel
+    service: search
+
+---
+# Source: hotel-reservation/charts/user/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: user
+spec:
+  type: ClusterIP
+  ports:
+  - name: "8086"
+    port: 8086
+    targetPort: 8086
+  selector:
+    app.kubernetes.io/name: user
+    app.kubernetes.io/instance: hotel
+    service: user
+
+---
+# Source: hotel-reservation/charts/frontend/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    helm.sh/chart: frontend-0.1.0
+    app.kubernetes.io/name: frontend
+    app.kubernetes.io/instance: hotel
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    service: frontend
+  name: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: frontend
+      app.kubernetes.io/instance: hotel
+      service: frontend
+      app: frontend
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: frontend-0.1.0
+        app.kubernetes.io/name: frontend
+        app.kubernetes.io/instance: hotel
+        app.kubernetes.io/version: "0.1.0"
+        app.kubernetes.io/managed-by: Helm
+        service: frontend
+        app: frontend
+    spec:
+      containers:
+      - name: "hotel-reserv-frontend"
+        image: ${HOTEL_IMAGE}
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+        ports:
+        - containerPort: 5000
+        env:
+          - name: GOMAXPROCS
+            valueFrom:
+              resourceFieldRef:
+                resource: limits.cpu
+                divisor: "1"
+          - name: GC
+            value: "100"
+          - name: JAEGER_SAMPLE_RATIO
+            value: "0.01"
+          - name: LOG_LEVEL
+            value: "INFO"
+          - name: MEMC_TIMEOUT
+            value: "2"
+          - name: TLS
+            value: "0"
+        command:
+        - /go/bin/frontend
+        volumeMounts:
+        - name: frontend-config
+          mountPath: /workspace/config.json
+          subPath: service-config.json
+      volumes:
+      - name: frontend-config
+        configMap:
+          name: frontend
+      hostname: frontend
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 5
+      affinity:
+        {}
+      tolerations:
+        []
+      nodeSelector:
+        {}
+
+---
+# Source: hotel-reservation/charts/geo/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    helm.sh/chart: geo-0.1.0
+    app.kubernetes.io/name: geo
+    app.kubernetes.io/instance: hotel
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    service: geo
+  name: geo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: geo
+      app.kubernetes.io/instance: hotel
+      service: geo
+      app: geo
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: geo-0.1.0
+        app.kubernetes.io/name: geo
+        app.kubernetes.io/instance: hotel
+        app.kubernetes.io/version: "0.1.0"
+        app.kubernetes.io/managed-by: Helm
+        service: geo
+        app: geo
+    spec:
+      containers:
+      - name: "hotel-reserv-geo"
+        image: ${HOTEL_IMAGE}
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+        ports:
+        - containerPort: 8083
+        env:
+          - name: GOMAXPROCS
+            valueFrom:
+              resourceFieldRef:
+                resource: limits.cpu
+                divisor: "1"
+          - name: GC
+            value: "100"
+          - name: JAEGER_SAMPLE_RATIO
+            value: "0.01"
+          - name: LOG_LEVEL
+            value: "INFO"
+          - name: MEMC_TIMEOUT
+            value: "2"
+          - name: TLS
+            value: "0"
+        command:
+        - /go/bin/geo
+        volumeMounts:
+        - name: geo-config
+          mountPath: /workspace/config.json
+          subPath: service-config.json
+      volumes:
+      - name: geo-config
+        configMap:
+          name: geo
+      hostname: geo
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 5
+      affinity:
+        {}
+      tolerations:
+        []
+      nodeSelector:
+        {}
+
+---
+# Source: hotel-reservation/charts/profile/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    helm.sh/chart: profile-0.1.0
+    app.kubernetes.io/name: profile
+    app.kubernetes.io/instance: hotel
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    service: profile
+  name: profile
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: profile
+      app.kubernetes.io/instance: hotel
+      service: profile
+      app: profile
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: profile-0.1.0
+        app.kubernetes.io/name: profile
+        app.kubernetes.io/instance: hotel
+        app.kubernetes.io/version: "0.1.0"
+        app.kubernetes.io/managed-by: Helm
+        service: profile
+        app: profile
+    spec:
+      containers:
+      - name: "hotel-reserv-profile"
+        image: ${HOTEL_IMAGE}
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+        ports:
+        - containerPort: 8081
+        env:
+          - name: GOMAXPROCS
+            valueFrom:
+              resourceFieldRef:
+                resource: limits.cpu
+                divisor: "1"
+          - name: GC
+            value: "100"
+          - name: JAEGER_SAMPLE_RATIO
+            value: "0.01"
+          - name: LOG_LEVEL
+            value: "INFO"
+          - name: MEMC_TIMEOUT
+            value: "2"
+          - name: TLS
+            value: "0"
+        command:
+        - /go/bin/profile
+        volumeMounts:
+        - name: profile-config
+          mountPath: /workspace/config.json
+          subPath: service-config.json
+      volumes:
+      - name: profile-config
+        configMap:
+          name: profile
+      hostname: profile
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 5
+      affinity:
+        {}
+      tolerations:
+        []
+      nodeSelector:
+        {}
+
+---
+# Source: hotel-reservation/charts/rate/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    helm.sh/chart: rate-0.1.0
+    app.kubernetes.io/name: rate
+    app.kubernetes.io/instance: hotel
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    service: rate
+  name: rate
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rate
+      app.kubernetes.io/instance: hotel
+      service: rate
+      app: rate
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: rate-0.1.0
+        app.kubernetes.io/name: rate
+        app.kubernetes.io/instance: hotel
+        app.kubernetes.io/version: "0.1.0"
+        app.kubernetes.io/managed-by: Helm
+        service: rate
+        app: rate
+    spec:
+      containers:
+      - name: "hotel-reserv-rate"
+        image: ${HOTEL_IMAGE}
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+        ports:
+        - containerPort: 8084
+        env:
+          - name: GOMAXPROCS
+            valueFrom:
+              resourceFieldRef:
+                resource: limits.cpu
+                divisor: "1"
+          - name: GC
+            value: "100"
+          - name: JAEGER_SAMPLE_RATIO
+            value: "0.01"
+          - name: LOG_LEVEL
+            value: "INFO"
+          - name: MEMC_TIMEOUT
+            value: "2"
+          - name: TLS
+            value: "0"
+        command:
+        - /go/bin/rate
+        volumeMounts:
+        - name: rate-config
+          mountPath: /workspace/config.json
+          subPath: service-config.json
+      volumes:
+      - name: rate-config
+        configMap:
+          name: rate
+      hostname: rate
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 5
+      affinity:
+        {}
+      tolerations:
+        []
+      nodeSelector:
+        {}
+
+---
+# Source: hotel-reservation/charts/recommendation/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    helm.sh/chart: recommendation-0.1.0
+    app.kubernetes.io/name: recommendation
+    app.kubernetes.io/instance: hotel
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    service: recommendation
+  name: recommendation
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: recommendation
+      app.kubernetes.io/instance: hotel
+      service: recommendation
+      app: recommendation
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: recommendation-0.1.0
+        app.kubernetes.io/name: recommendation
+        app.kubernetes.io/instance: hotel
+        app.kubernetes.io/version: "0.1.0"
+        app.kubernetes.io/managed-by: Helm
+        service: recommendation
+        app: recommendation
+    spec:
+      containers:
+      - name: "hotel-reserv-recommendation"
+        image: ${HOTEL_IMAGE}
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+        ports:
+        - containerPort: 8085
+        env:
+          - name: GOMAXPROCS
+            valueFrom:
+              resourceFieldRef:
+                resource: limits.cpu
+                divisor: "1"
+          - name: GC
+            value: "100"
+          - name: JAEGER_SAMPLE_RATIO
+            value: "0.01"
+          - name: LOG_LEVEL
+            value: "INFO"
+          - name: MEMC_TIMEOUT
+            value: "2"
+          - name: TLS
+            value: "0"
+        command:
+        - /go/bin/recommendation
+        volumeMounts:
+        - name: recommendation-config
+          mountPath: /workspace/config.json
+          subPath: service-config.json
+      volumes:
+      - name: recommendation-config
+        configMap:
+          name: recommendation
+      hostname: recommendation
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 5
+      affinity:
+        {}
+      tolerations:
+        []
+      nodeSelector:
+        {}
+
+---
+# Source: hotel-reservation/charts/reservation/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    helm.sh/chart: reservation-0.1.0
+    app.kubernetes.io/name: reservation
+    app.kubernetes.io/instance: hotel
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    service: reservation
+  name: reservation
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: reservation
+      app.kubernetes.io/instance: hotel
+      service: reservation
+      app: reservation
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: reservation-0.1.0
+        app.kubernetes.io/name: reservation
+        app.kubernetes.io/instance: hotel
+        app.kubernetes.io/version: "0.1.0"
+        app.kubernetes.io/managed-by: Helm
+        service: reservation
+        app: reservation
+    spec:
+      containers:
+      - name: "hotel-reserv-reservation"
+        image: ${HOTEL_IMAGE}
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+        ports:
+        - containerPort: 8087
+        env:
+          - name: GOMAXPROCS
+            valueFrom:
+              resourceFieldRef:
+                resource: limits.cpu
+                divisor: "1"
+          - name: GC
+            value: "100"
+          - name: JAEGER_SAMPLE_RATIO
+            value: "0.01"
+          - name: LOG_LEVEL
+            value: "INFO"
+          - name: MEMC_TIMEOUT
+            value: "2"
+          - name: TLS
+            value: "0"
+        command:
+        - /go/bin/reservation
+        volumeMounts:
+        - name: reservation-config
+          mountPath: /workspace/config.json
+          subPath: service-config.json
+      volumes:
+      - name: reservation-config
+        configMap:
+          name: reservation
+      hostname: reservation
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 5
+      affinity:
+        {}
+      tolerations:
+        []
+      nodeSelector:
+        {}
+
+---
+# Source: hotel-reservation/charts/search/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    helm.sh/chart: search-0.1.0
+    app.kubernetes.io/name: search
+    app.kubernetes.io/instance: hotel
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    service: search
+  name: search
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: search
+      app.kubernetes.io/instance: hotel
+      service: search
+      app: search
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: search-0.1.0
+        app.kubernetes.io/name: search
+        app.kubernetes.io/instance: hotel
+        app.kubernetes.io/version: "0.1.0"
+        app.kubernetes.io/managed-by: Helm
+        service: search
+        app: search
+    spec:
+      containers:
+      - name: "hotel-reserv-search"
+        image: ${HOTEL_IMAGE}
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+        ports:
+        - containerPort: 8082
+        env:
+          - name: GOMAXPROCS
+            valueFrom:
+              resourceFieldRef:
+                resource: limits.cpu
+                divisor: "1"
+          - name: GC
+            value: "100"
+          - name: JAEGER_SAMPLE_RATIO
+            value: "0.01"
+          - name: LOG_LEVEL
+            value: "INFO"
+          - name: MEMC_TIMEOUT
+            value: "2"
+          - name: TLS
+            value: "0"
+        command:
+        - /go/bin/search
+        volumeMounts:
+        - name: search-config
+          mountPath: /workspace/config.json
+          subPath: service-config.json
+      volumes:
+      - name: search-config
+        configMap:
+          name: search
+      hostname: search
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 5
+      affinity:
+        {}
+      tolerations:
+        []
+      nodeSelector:
+        {}
+
+---
+# Source: hotel-reservation/charts/user/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    helm.sh/chart: user-0.1.0
+    app.kubernetes.io/name: user
+    app.kubernetes.io/instance: hotel
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    service: user
+  name: user
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: user
+      app.kubernetes.io/instance: hotel
+      service: user
+      app: user
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: user-0.1.0
+        app.kubernetes.io/name: user
+        app.kubernetes.io/instance: hotel
+        app.kubernetes.io/version: "0.1.0"
+        app.kubernetes.io/managed-by: Helm
+        service: user
+        app: user
+    spec:
+      containers:
+      - name: "hotel-reserv-user"
+        image: ${HOTEL_IMAGE}
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+        ports:
+        - containerPort: 8086
+        env:
+          - name: GOMAXPROCS
+            valueFrom:
+              resourceFieldRef:
+                resource: limits.cpu
+                divisor: "1"
+          - name: GC
+            value: "100"
+          - name: JAEGER_SAMPLE_RATIO
+            value: "0.01"
+          - name: LOG_LEVEL
+            value: "INFO"
+          - name: MEMC_TIMEOUT
+            value: "2"
+          - name: TLS
+            value: "0"
+        command:
+        - /go/bin/user
+        volumeMounts:
+        - name: user-config
+          mountPath: /workspace/config.json
+          subPath: service-config.json
+      volumes:
+      - name: user-config
+        configMap:
+          name: user
+      hostname: user
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 5
+      affinity:
+        {}
+      tolerations:
+        []
+      nodeSelector:
+        {}
