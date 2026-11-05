@@ -7,7 +7,7 @@ Both are measured on every sample, against a Kubernetes cluster, in two phases:
 
 | Objective | Direction | Phase |
 | --- | --- | --- |
-| `operations_per_second` | max | Closed loop, 32 concurrent clients, the canonical mixed workload. |
+| `operations_per_second` | max | Closed loop, 32 concurrent clients, the canonical mixed workload, 2 trials of 60 s after a 15 s warmup. |
 | `latency_ms.p99` | min | Open loop, the same mix, offered at 70% of the throughput the same sample's closed loop just measured. |
 
 The two together form a Pareto frontier: a change that raises throughput and lowers tail
