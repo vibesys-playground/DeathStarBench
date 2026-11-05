@@ -18,12 +18,14 @@ import (
 type Reference struct {
 	Data *dataset.Dataset
 
-	byID      map[string]int
 	geo       *geoIndex
-	byLat     []int // hotel indices sorted by latitude, for nearest-hotel scans
+	byLat     []int32 // hotel indices sorted by latitude, for nearest-hotel scans
 	bestRated []string
 	cheapest  []string
 	passwords map[string]string
+	// seededMax caches SeededMaxRooms by hotel index (-1: not computed).
+	seededMu  sync.Mutex
+	seededMax map[int]int
 }
 
 var (
@@ -39,36 +41,32 @@ func DefaultReference() *Reference {
 
 // NewReference indexes a dataset.
 func NewReference(data *dataset.Dataset) *Reference {
+	n := data.HotelCount()
 	r := &Reference{
 		Data:      data,
-		byID:      make(map[string]int, len(data.Hotels)),
-		byLat:     make([]int, len(data.Hotels)),
+		byLat:     make([]int32, n),
 		passwords: make(map[string]string, len(data.Users)),
+		seededMax: map[int]int{},
 	}
-	points := make([]geoPoint, 0, len(data.Hotels))
+	points := make([]geoPoint, 0, n)
 	maxRating, minPrice := 0.0, math.MaxFloat64
-	for index := range data.Hotels {
-		hotel := &data.Hotels[index]
-		r.byID[hotel.ID] = index
-		r.byLat[index] = index
-		points = append(points, geoPoint{id: hotel.ID, lat: hotel.Lat, lon: hotel.Lon})
+	for index := range n {
+		r.byLat[index] = int32(index)
+		lat, lon := data.Location(index)
+		points = append(points, geoPoint{id: dataset.HotelID(index), lat: lat, lon: lon})
 		// services/recommendation: max rate from 0.0, min price from MaxFloat64.
-		if hotel.Rating > maxRating {
-			maxRating = hotel.Rating
+		maxRating = math.Max(maxRating, data.Rating(index))
+		minPrice = math.Min(minPrice, data.Price(index))
+	}
+	for index := range n {
+		if data.Rating(index) == maxRating {
+			r.bestRated = append(r.bestRated, dataset.HotelID(index))
 		}
-		if hotel.Price < minPrice {
-			minPrice = hotel.Price
+		if data.Price(index) == minPrice {
+			r.cheapest = append(r.cheapest, dataset.HotelID(index))
 		}
 	}
-	for index := range data.Hotels {
-		if data.Hotels[index].Rating == maxRating {
-			r.bestRated = append(r.bestRated, data.Hotels[index].ID)
-		}
-		if data.Hotels[index].Price == minPrice {
-			r.cheapest = append(r.cheapest, data.Hotels[index].ID)
-		}
-	}
-	sort.SliceStable(r.byLat, func(i, j int) bool { return data.Hotels[r.byLat[i]].Lat < data.Hotels[r.byLat[j]].Lat })
+	sort.SliceStable(r.byLat, func(i, j int) bool { return points[r.byLat[i]].lat < points[r.byLat[j]].lat })
 	r.geo = newGeoIndex(points)
 	for _, user := range data.Users {
 		r.passwords[user.Username] = user.Password
@@ -76,31 +74,39 @@ func NewReference(data *dataset.Dataset) *Reference {
 	return r
 }
 
-// Hotel returns the hotel with the given ID.
+// Hotel returns the seeded hotel with the given ID, generated in full.
 func (r *Reference) Hotel(id string) (*dataset.Hotel, bool) {
-	index, ok := r.byID[id]
+	index, ok := r.Data.HotelIndex(id)
 	if !ok {
 		return nil, false
 	}
-	return &r.Data.Hotels[index], true
+	return r.Data.Hotel(index), true
 }
 
 // Capacity is the hotel's seeded room count.
 func (r *Reference) Capacity(id string) (int, error) {
-	hotel, ok := r.Hotel(id)
+	index, ok := r.Data.HotelIndex(id)
 	if !ok {
 		return 0, fmt.Errorf("unknown Hotel hotel ID %q", id)
 	}
-	return hotel.Capacity, nil
+	return r.Data.Capacity(index), nil
 }
 
-// HotelIDs returns every hotel ID in ID order.
-func (r *Reference) HotelIDs() []string {
-	ids := make([]string, len(r.Data.Hotels))
-	for index := range r.Data.Hotels {
-		ids[index] = r.Data.Hotels[index].ID
+// SeededMaxRooms is the most rooms the seeded bookings hold on one night of the hotel (0 for
+// an unknown or added hotel): a capacity below it is rejected (409).
+func (r *Reference) SeededMaxRooms(id string) int {
+	index, ok := r.Data.HotelIndex(id)
+	if !ok {
+		return 0
 	}
-	return ids
+	r.seededMu.Lock()
+	defer r.seededMu.Unlock()
+	most, ok := r.seededMax[index]
+	if !ok {
+		most = r.Data.SeededMaxRooms(index)
+		r.seededMax[index] = most
+	}
+	return most
 }
 
 // User returns account index modulo the number of users.
@@ -150,11 +156,11 @@ func (r *Reference) SearchCandidatesWith(latText, lonText string, added *Additio
 	nearby, exact := r.geo.kNearest(lat, lon, extra)
 	ids = nearby[:0:0]
 	for _, id := range nearby {
-		hotel, ok := r.Hotel(id)
-		if !ok && added != nil {
-			hotel, ok = added.byID[id]
-		}
-		if ok && len(hotel.RatePlans) > 0 {
+		if index, ok := r.Data.HotelIndex(id); ok {
+			if r.Data.PlanCount(index) > 0 {
+				ids = append(ids, id)
+			}
+		} else if hotel, ok := added.Hotel(id); ok && len(hotel.RatePlans) > 0 {
 			ids = append(ids, id)
 		}
 	}
@@ -195,35 +201,36 @@ func RecommendDistanceKm(lat, lon float64, hotel *dataset.Hotel) float64 {
 // NearestHotelsDistance is NearestHotels and the distance of the answer.
 func (r *Reference) NearestHotelsDistance(lat, lon float64) ([]string, float64) {
 	query := geoPoint{lat: lat, lon: lon}
-	hotels := r.Data.Hotels
-	start := sort.Search(len(r.byLat), func(i int) bool { return hotels[r.byLat[i]].Lat >= lat })
+	data := r.Data
+	latOf := func(i int) float64 { lat, _ := data.Location(int(r.byLat[i])); return lat }
+	start := sort.Search(len(r.byLat), func(i int) bool { return latOf(i) >= lat })
 	best := math.MaxFloat64
 	var ids []string
 	visit := func(index int) {
-		hotel := &hotels[index]
-		distance := geoDistance(query, geoPoint{lat: hotel.Lat, lon: hotel.Lon}) / 1000
+		hotelLat, hotelLon := data.Location(index)
+		distance := geoDistance(query, geoPoint{lat: hotelLat, lon: hotelLon}) / 1000
 		switch {
 		case distance < best:
-			best, ids = distance, append(ids[:0], hotel.ID)
+			best, ids = distance, append(ids[:0], dataset.HotelID(index))
 		case distance == best:
-			ids = append(ids, hotel.ID)
+			ids = append(ids, dataset.HotelID(index))
 		}
 	}
 	// A great-circle distance is at least the latitude difference's arc, so
 	// the scan stops once a band's latitude alone is farther than the best.
-	beyond := func(index int) bool {
-		bound := geoEarthRadius * geoToRadians(math.Abs(hotels[index].Lat-lat)) / 1000
+	beyond := func(i int) bool {
+		bound := geoEarthRadius * geoToRadians(math.Abs(latOf(i)-lat)) / 1000
 		return bound > best*(1+1e-9)+1e-9
 	}
 	for low, high := start-1, start; low >= 0 || high < len(r.byLat); {
 		progressed := false
-		if high < len(r.byLat) && !beyond(r.byLat[high]) {
-			visit(r.byLat[high])
+		if high < len(r.byLat) && !beyond(high) {
+			visit(int(r.byLat[high]))
 			high++
 			progressed = true
 		}
-		if low >= 0 && !beyond(r.byLat[low]) {
-			visit(r.byLat[low])
+		if low >= 0 && !beyond(low) {
+			visit(int(r.byLat[low]))
 			low--
 			progressed = true
 		}
@@ -242,8 +249,14 @@ func (r *Reference) Cheapest() []string { return append([]string(nil), r.cheapes
 
 // MaxRating and MinPrice are the seeded extremes that BestRated and
 // Cheapest answer.
-func (r *Reference) MaxRating() float64 { hotel, _ := r.Hotel(r.bestRated[0]); return hotel.Rating }
-func (r *Reference) MinPrice() float64  { hotel, _ := r.Hotel(r.cheapest[0]); return hotel.Price }
+func (r *Reference) MaxRating() float64 {
+	index, _ := r.Data.HotelIndex(r.bestRated[0])
+	return r.Data.Rating(index)
+}
+func (r *Reference) MinPrice() float64 {
+	index, _ := r.Data.HotelIndex(r.cheapest[0])
+	return r.Data.Price(index)
+}
 
 // BestRatedWith is BestRated over the dataset and the added hotels.
 func (r *Reference) BestRatedWith(added *Additions) []string {

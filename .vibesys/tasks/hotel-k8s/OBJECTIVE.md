@@ -23,12 +23,13 @@ manifest `hotelReservation/deploy/app.yaml` (see Resources). Do not touch `.vibe
 
 The task owns everything else, and a candidate cannot change it:
 
-- the data: the task generates its dataset and writes it into the six MongoDB
-  databases before your services start (see Data below);
+- the data: the task generates its dataset and the six MongoDB databases hold it, restored
+  from a snapshot, before your services start (see Data below);
 - the data tier and its resources (`k8s/manifest.yaml`): 6 MongoDB at 2 CPU / 2 GiB
-  each, 3 memcached at 1 CPU / 1 GiB each, consul at 1 CPU / 512 MiB and jaeger at
-  2 CPU / 1 GiB, one replica each, so that the stores are not the bottleneck and a
-  candidate cannot buy speed by shrinking them; the services' ConfigMaps (`frontend`,
+  each with a WiredTiger cache of 0.25 GiB, 3 memcached at 1 CPU / 1 GiB each holding
+  64 MiB of items, consul at 1 CPU / 512 MiB and jaeger at 2 CPU / 1 GiB, one replica
+  each, so that the stores are not the bottleneck and a candidate cannot buy speed by
+  shrinking them; the services' ConfigMaps (`frontend`,
   `geo`, `profile`, `rate`, `recommendation`, `reservation`, `search`, `user`, each with
   the `service-config.json` of the data tier's addresses); and the `frontend` Service
   (port 5000, selecting the pods labelled `app.kubernetes.io/name: frontend`,
@@ -40,22 +41,24 @@ The task owns everything else, and a candidate cannot change it:
 
 ## Resources
 
-The application tier has a fixed capacity: **16 CPUs and 32 GiB in total** across all
+The application tier has a fixed capacity: **16 CPUs and 8 GiB in total** across all
 application pods (each container's requests equal its limits). You choose how the eight
 services' code is grouped into Deployments, how many replicas each Deployment runs (at
 least 2, so that any one pod can restart without losing service), and how the 16 CPUs and
-32 GiB are split among them. The data tier (6 MongoDB, 3 memcached, consul, jaeger) and its
+8 GiB are split among them. The data is about eleven times that memory (see Data). The data tier (6 MongoDB, 3 memcached, consul, jaeger) and its
 resources stay as given. GOMAXPROCS of each application container must equal its CPU limit.
 
 `hotelReservation/deploy/app.yaml` is that tier: Kubernetes Deployments, Services and
-ConfigMaps, applied after the task's data tier has been seeded. The base gives the
-reference topology: eight Deployments (one per service) of 2 pods at 1 CPU / 2 GiB each,
-and a Service per gRPC service. Before it builds or deploys anything, the check and the
+ConfigMaps, applied after the task's data tier holds the data. The base gives the
+reference topology: eight Deployments (one per service) of 2 pods at 1 CPU each, with
+geo at 1280 MiB and recommendation at 1 GiB (they hold every hotel's location), user and
+frontend at 384 MiB and the others at 256 MiB (8 GiB in all), and a Service per gRPC
+service. Before it builds or deploys anything, the check and the
 benchmark validate the file, and a candidate that breaks a rule fails with a message that
 names the object and key:
 
 - the CPU limits, summed over every container of every replica, are at most 16, and the
-  memory limits at most 32 GiB; every container sets `requests` equal to `limits` for
+  memory limits at most 8 GiB; every container sets `requests` equal to `limits` for
   `cpu` and `memory` (nothing else), at least 100m CPU and 64 MiB, CPU in whole millicores;
 - every Deployment sets `replicas` to at least 2;
 - every container sets `GOMAXPROCS` once, to its CPU limit rounded up: the literal value
@@ -101,19 +104,33 @@ acknowledged write or bring back an older value.
 
 ## Data
 
-The databases hold a realistic dataset that the task generates from a fixed seed and
-writes before the application services start: 25,000 hotels in 20 cities worldwide
-(distributed by city popularity, spread a few km around each centre), each with a
-profile, a location, 1 to 5 rate plans over the year 2027, a rating, a price and a room
-capacity, and 10,000 user accounts; about 30 MB of documents, with indexes on the
-services' query keys. A service finds its collection non-empty and must not replace or
-rewrite it; it may read it however it likes (and add indexes of its own). The data
-changes only through the owner routes below. Requests are spread realistically over
-this data: search and recommendation locations by city popularity with a continuous
-spread, stays of 1 to 7 nights over 2027, logins and reservations by user and hotel
-popularity, so exact-request caching hits rarely and caches have to be sized for the
-data. About 1% of the requests are owner writes, drawn by the same hotel popularity, so
-hot data changes during the run.
+The databases hold a realistic dataset that the task generates from a fixed seed:
+1,500,000 hotels in 20 metropolitan areas worldwide (distributed by city popularity,
+spread around each centre), each with a profile, a location, 1 to 5 rate plans over
+2027-2028, a rating, a price and a room capacity; for every hotel and every night of that
+730-night window, the rooms already booked (reservation-db `nights`, one document per
+hotel and night with bookings: about 1.09 billion documents); and 500,000 user accounts.
+That is about 112 GB of documents and indexes as MongoDB holds them in memory (about 52 GB
+compressed on disk), against 8 GiB of application memory, 0.25 GiB of WiredTiger cache
+per MongoDB server and 3 x 64 MiB of memcached: about eleven times all of it together, so
+the data cannot be held in memory as documents. The seeded bookings leave at least one
+room free on every night, so a search over the seeded calendar finds every hotel
+available; a reservation counts against them, and `POST /admin/capacity` answers 409
+when the new count is below the rooms booked on some night, seeded or reserved.
+
+The task restores the data into each sample's MongoDB servers from a snapshot on the node
+(built once from the generator, then copied by each sample, so every sample starts from the
+same data and no sample's writes reach the next). A service finds its collection non-empty
+and must not replace or rewrite it; it may read it however it likes (and add indexes of its
+own). The data changes only through the owner routes and reservations below. Requests are
+spread realistically over this data: search and recommendation locations by city
+popularity with a continuous spread, stays of 1 to 7 nights over 2027-2028, logins and
+reservations by user and hotel popularity. The (hotel, night) pairs a search reads are
+close to uniform over the 1.09 billion: a cache that holds a share of them as documents
+hits about that share of the time (about 10% for the whole application memory), so exact-
+request and document caching help little; compact representations and fewer, better
+batched reads are what scale. About 1% of the requests are owner writes, drawn by the same
+hotel popularity, so hot data changes during the run.
 
 ## Writes and their visibility
 

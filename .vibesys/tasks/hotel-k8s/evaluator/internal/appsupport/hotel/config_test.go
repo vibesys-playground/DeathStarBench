@@ -20,7 +20,7 @@ func TestSeedInputsComeFromTheDataset(t *testing.T) {
 			t.Fatalf("ValidLogin disagrees for user %d", index)
 		}
 	}
-	for _, hotel := range []dataset.Hotel{data.Hotels[0], data.Hotels[len(data.Hotels)-1]} {
+	for _, hotel := range []*dataset.Hotel{data.Hotel(0), data.Hotel(data.HotelCount() - 1)} {
 		if got, err := Capacity(hotel.ID); err != nil || got != hotel.Capacity {
 			t.Fatalf("Capacity(%s) = %d, %v; want %d", hotel.ID, got, err, hotel.Capacity)
 		}

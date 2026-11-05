@@ -95,9 +95,9 @@ func decodeFeature(value any, index int) (feature, error) {
 	return feature{id: id, name: name, phone: phone, lat: lat, lon: lon, raw: object}, nil
 }
 
-func validateProfiles(actual map[string]feature, catalog map[string]profile, where string) error {
+func validateProfiles(actual map[string]feature, catalog catalog, where string) error {
 	for id, item := range actual {
-		expected, ok := catalog[id]
+		expected, ok := catalog.get(id)
 		if !ok {
 			return fmt.Errorf("%s returned unknown hotel ID %q", where, id)
 		}

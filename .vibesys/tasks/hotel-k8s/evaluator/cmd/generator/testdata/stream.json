@@ -1,18 +1,18 @@
 {
-  "about": "the Python workload's stream (bench.py before the Go port) for these phases: SHA-256 over the Go generator's frames (4-byte little-endian length, then the frame) after the FileHeader: the RequestsHeader and the first operations; and over its kept records of those operations",
-  "dataset_sha256": "00904676e11a2db1eb144d42e1c4a0d4fbad1862bd1cc34e3003b94efb946222",
+  "about": "the Go generator's stream for these phases over dataset.py's SPEC (re-recorded with -update when the dataset grew; first recorded from the Python workload, which it equalled): SHA-256 over the frames (4-byte little-endian length, then the frame) after the FileHeader: the RequestsHeader and the first operations; and over its kept records of those operations. phase2.binpb's history is phase0's first writes (historyOf)",
+  "dataset_sha256": "83db918e18c95fcf10f69e2fff6ff703ce3940f745f03b2835599c0ef98d76db",
   "phases": [
     {
       "phase_input": "phase0.binpb",
       "operations": 30000,
-      "stream_sha256": "4cc75af87d0bada0345f5eef8047f160e44c396b676474fe9230e598d70ed32c",
-      "kept_sha256": "a82bb510b4106eab19e8ca82000b6f4654a3b4507d84fb1adea86aed2f89ac9a"
+      "stream_sha256": "ec73c344d8de9232f4e3073649d7a5adb6bb0a80ed2d853f26ea6588e7502e6f",
+      "kept_sha256": "2705bac5aaf6c10d30ada09d3511c56f70538a122a9aa5b5203fb121fc76fe7d"
     },
     {
       "phase_input": "phase2.binpb",
       "operations": 60000,
-      "stream_sha256": "5f77485cc9785f9de0ec7d2bb57577728c9f800a611f0f37689ed0656a08f707",
-      "kept_sha256": "7e608fd7d56bed9d5cd0328e3ca48d89caf730d236a231bb3791bcde1c5295e1"
+      "stream_sha256": "f05e64fe17c78ff5433ca2c1f76bc3f14c1c7b667bdcc184b4670d07ebd82c35",
+      "kept_sha256": "e35bfbff9e323b2b422f327f2206840ee7501a2311d5ee14a1d166f1986b2906"
     }
   ]
 }

@@ -13,7 +13,7 @@ import (
 type Application struct {
 	timeout time.Duration
 	seed    int64
-	catalog map[string]profile
+	catalog catalog
 	strict  hotelsupport.Strictness
 	// restart, when set, is the task's restart hook (NewWithRestarter).
 	restart Restarter

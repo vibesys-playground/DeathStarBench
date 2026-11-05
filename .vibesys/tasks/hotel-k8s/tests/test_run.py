@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 TASK_DIR = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location("hotel_run", TASK_DIR / "run.py")
@@ -91,6 +92,44 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(flag(ready, "--probed").split(","), list(app.frontend))
         hook = run.podctl_command(app, "restart")
         self.assertEqual(flag(hook, "--deployments").split(","), app.names + ["memcached-reserve"])
+
+class SnapshotTest(unittest.TestCase):
+    ENV = {"VIBESYS_K8S_REGISTRY": "reg:5000", "VIBESYS_K8S_BUILDER": "tcp://b:1"}
+
+    def test_the_check_ensures_the_snapshot_of_the_tasks_dataset(self):
+        import dataset
+
+        seen = []
+
+        def ensure(spec_json, **kwargs):  # noqa: ANN001, ANN202
+            seen.append((spec_json, kwargs))
+            return run.snapshot.Ensured(version="ab" * 10, seconds=1.0, summary={})
+
+        with mock.patch.dict(run.os.environ, self.ENV), mock.patch.object(run.snapshot, "ensure", ensure):
+            self.assertEqual(run.ensure_snapshot(), "ab" * 10)
+        (spec_json, kwargs), = seen
+        self.assertEqual(spec_json.encode(), dataset.encode(dataset.SPEC))
+        self.assertEqual(kwargs["deadline_seconds"], run.SNAPSHOT_WAIT_SECONDS)
+        self.assertEqual((kwargs["registry"], kwargs["builder"]), ("reg:5000", "tcp://b:1"))
+
+    def test_a_snapshot_failure_is_the_jobs(self):
+        def ensure(spec_json, **kwargs):  # noqa: ANN001, ANN202
+            raise run.snapshot.SnapshotError("data-x1 failed")
+
+        with mock.patch.dict(run.os.environ, self.ENV), mock.patch.object(run.snapshot, "ensure", ensure):
+            with self.assertRaises(run.JobError) as caught:
+                run.ensure_snapshot()
+        self.assertIn("data-x1 failed", str(caught.exception))
+
+    def test_the_timeouts_cover_a_first_build(self):
+        """A job that finds no snapshot waits for its build (about 25 minutes) and still finishes."""
+        manifest = run.tomllib.loads((TASK_DIR / "vibesys.input.toml").read_text())
+        self.assertGreater(manifest["accuracy"]["timeout_seconds"],
+                           run.SNAPSHOT_WAIT_SECONDS + run.DATA_TIER_TIMEOUT_SECONDS + run.ORACLE_TIMEOUT_SECONDS)
+        import bench
+
+        self.assertGreater(manifest["benchmark"]["timeout_seconds"], bench.SNAPSHOT_WAIT_SECONDS + 1800)
+
 
 if __name__ == "__main__":
     unittest.main()

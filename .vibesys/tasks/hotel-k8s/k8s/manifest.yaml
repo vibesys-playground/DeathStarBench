@@ -5,7 +5,8 @@
 # The task's part: the data tier (labelled tier: data), the services' ConfigMaps and the
 # frontend Service. The application tier (Deployments and their Services) is the candidate's,
 # hotelReservation/deploy/app.yaml (k8s/app.yaml is the reference copy); envelope.py
-# validates it and appends it to this file.
+# validates it and appends it to this file. Each MongoDB pod restores its database from the
+# node's snapshot (snapshot.py): @DATA_SNAPSHOT_VERSION@ is replaced by its version.
 ---
 # Source: hotel-reservation/charts/frontend/templates/configmap.yaml
 apiVersion: v1
@@ -677,6 +678,9 @@ spec:
           limits:
             cpu: "1"
             memory: 1Gi
+        # 64 MiB of items (memcached's default, which the image ran with: it does not read
+        # MEMCACHED_CACHE_SIZE), made explicit: the cache is part of the fixed data tier.
+        args: ["-m", "64"]
         ports:
         - containerPort: 11211
         env:
@@ -741,6 +745,9 @@ spec:
           limits:
             cpu: "1"
             memory: 1Gi
+        # 64 MiB of items (memcached's default, which the image ran with: it does not read
+        # MEMCACHED_CACHE_SIZE), made explicit: the cache is part of the fixed data tier.
+        args: ["-m", "64"]
         ports:
         - containerPort: 11211
         env:
@@ -805,6 +812,9 @@ spec:
           limits:
             cpu: "1"
             memory: 1Gi
+        # 64 MiB of items (memcached's default, which the image ran with: it does not read
+        # MEMCACHED_CACHE_SIZE), made explicit: the cache is part of the fixed data tier.
+        args: ["-m", "64"]
         ports:
         - containerPort: 11211
         env:
@@ -858,6 +868,37 @@ spec:
         service: mongodb-geo
         app: mongodb-geo
     spec:
+      # The data: a copy of the node's snapshot of geo-db (snapshot.py), made before mongod
+      # starts; this sample's writes stay in the emptyDir.
+      initContainers:
+      - name: restore
+        image: docker.io/mongo:5.0@sha256:41108d183e972dcbf98d09ed83f6cfc89a471a3f15d06f9d64a95e45d9db8dd2
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -c
+        - |
+          set -eu
+          src=/snapshots/@DATA_SNAPSHOT_VERSION@/geo-db
+          if [ ! -f "$src/COMPLETE" ]; then
+            echo "the snapshot $src is not complete: the data Job (snapshot.py) builds it" >&2
+            exit 1
+          fi
+          cp -a "$src/db/." /data/db/
+          chown -R 999:999 /data/db
+        resources:
+          requests:
+            cpu: "2"
+            memory: 2Gi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        volumeMounts:
+        - mountPath: /data/db
+          name: mongodb-geo-path
+        - mountPath: /snapshots
+          name: snapshots
+          readOnly: true
       containers:
       - name: "hotel-reserv-geo-mongo"
         image: docker.io/mongo:5.0@sha256:41108d183e972dcbf98d09ed83f6cfc89a471a3f15d06f9d64a95e45d9db8dd2
@@ -869,6 +910,8 @@ spec:
           limits:
             cpu: "2"
             memory: 2Gi
+        # The WiredTiger cache is fixed: the data does not fit in memory (OBJECTIVE.md, Data).
+        args: ["--wiredTigerCacheSizeGB", "0.25"]
         ports:
         - containerPort: 27017
         volumeMounts:
@@ -877,6 +920,10 @@ spec:
       volumes:
       - name: mongodb-geo-path
         emptyDir: {}
+      - name: snapshots
+        hostPath:
+          path: /var/lib/hotel-k8s/snapshots
+          type: Directory
       hostname: mongodb-geo
       restartPolicy: Always
       terminationGracePeriodSeconds: 5
@@ -923,6 +970,37 @@ spec:
         service: mongodb-profile
         app: mongodb-profile
     spec:
+      # The data: a copy of the node's snapshot of profile-db (snapshot.py), made before mongod
+      # starts; this sample's writes stay in the emptyDir.
+      initContainers:
+      - name: restore
+        image: docker.io/mongo:5.0@sha256:41108d183e972dcbf98d09ed83f6cfc89a471a3f15d06f9d64a95e45d9db8dd2
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -c
+        - |
+          set -eu
+          src=/snapshots/@DATA_SNAPSHOT_VERSION@/profile-db
+          if [ ! -f "$src/COMPLETE" ]; then
+            echo "the snapshot $src is not complete: the data Job (snapshot.py) builds it" >&2
+            exit 1
+          fi
+          cp -a "$src/db/." /data/db/
+          chown -R 999:999 /data/db
+        resources:
+          requests:
+            cpu: "2"
+            memory: 2Gi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        volumeMounts:
+        - mountPath: /data/db
+          name: mongodb-profile-path
+        - mountPath: /snapshots
+          name: snapshots
+          readOnly: true
       containers:
       - name: "hotel-reserv-profile-mongo"
         image: docker.io/mongo:5.0@sha256:41108d183e972dcbf98d09ed83f6cfc89a471a3f15d06f9d64a95e45d9db8dd2
@@ -934,6 +1012,8 @@ spec:
           limits:
             cpu: "2"
             memory: 2Gi
+        # The WiredTiger cache is fixed: the data does not fit in memory (OBJECTIVE.md, Data).
+        args: ["--wiredTigerCacheSizeGB", "0.25"]
         ports:
         - containerPort: 27017
         volumeMounts:
@@ -942,6 +1022,10 @@ spec:
       volumes:
       - name: mongodb-profile-path
         emptyDir: {}
+      - name: snapshots
+        hostPath:
+          path: /var/lib/hotel-k8s/snapshots
+          type: Directory
       hostname: mongodb-profile
       restartPolicy: Always
       terminationGracePeriodSeconds: 5
@@ -988,6 +1072,37 @@ spec:
         service: mongodb-rate
         app: mongodb-rate
     spec:
+      # The data: a copy of the node's snapshot of rate-db (snapshot.py), made before mongod
+      # starts; this sample's writes stay in the emptyDir.
+      initContainers:
+      - name: restore
+        image: docker.io/mongo:5.0@sha256:41108d183e972dcbf98d09ed83f6cfc89a471a3f15d06f9d64a95e45d9db8dd2
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -c
+        - |
+          set -eu
+          src=/snapshots/@DATA_SNAPSHOT_VERSION@/rate-db
+          if [ ! -f "$src/COMPLETE" ]; then
+            echo "the snapshot $src is not complete: the data Job (snapshot.py) builds it" >&2
+            exit 1
+          fi
+          cp -a "$src/db/." /data/db/
+          chown -R 999:999 /data/db
+        resources:
+          requests:
+            cpu: "2"
+            memory: 2Gi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        volumeMounts:
+        - mountPath: /data/db
+          name: mongodb-rate-path
+        - mountPath: /snapshots
+          name: snapshots
+          readOnly: true
       containers:
       - name: "hotel-reserv-rate-mongo"
         image: docker.io/mongo:5.0@sha256:41108d183e972dcbf98d09ed83f6cfc89a471a3f15d06f9d64a95e45d9db8dd2
@@ -999,6 +1114,8 @@ spec:
           limits:
             cpu: "2"
             memory: 2Gi
+        # The WiredTiger cache is fixed: the data does not fit in memory (OBJECTIVE.md, Data).
+        args: ["--wiredTigerCacheSizeGB", "0.25"]
         ports:
         - containerPort: 27017
         volumeMounts:
@@ -1007,6 +1124,10 @@ spec:
       volumes:
       - name: mongodb-rate-path
         emptyDir: {}
+      - name: snapshots
+        hostPath:
+          path: /var/lib/hotel-k8s/snapshots
+          type: Directory
       hostname: mongodb-rate
       restartPolicy: Always
       terminationGracePeriodSeconds: 5
@@ -1053,6 +1174,37 @@ spec:
         service: mongodb-recommendation
         app: mongodb-recommendation
     spec:
+      # The data: a copy of the node's snapshot of recommendation-db (snapshot.py), made before mongod
+      # starts; this sample's writes stay in the emptyDir.
+      initContainers:
+      - name: restore
+        image: docker.io/mongo:5.0@sha256:41108d183e972dcbf98d09ed83f6cfc89a471a3f15d06f9d64a95e45d9db8dd2
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -c
+        - |
+          set -eu
+          src=/snapshots/@DATA_SNAPSHOT_VERSION@/recommendation-db
+          if [ ! -f "$src/COMPLETE" ]; then
+            echo "the snapshot $src is not complete: the data Job (snapshot.py) builds it" >&2
+            exit 1
+          fi
+          cp -a "$src/db/." /data/db/
+          chown -R 999:999 /data/db
+        resources:
+          requests:
+            cpu: "2"
+            memory: 2Gi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        volumeMounts:
+        - mountPath: /data/db
+          name: mongodb-recommendation-path
+        - mountPath: /snapshots
+          name: snapshots
+          readOnly: true
       containers:
       - name: "hotel-reserv-recommendation-mongo"
         image: docker.io/mongo:5.0@sha256:41108d183e972dcbf98d09ed83f6cfc89a471a3f15d06f9d64a95e45d9db8dd2
@@ -1064,6 +1216,8 @@ spec:
           limits:
             cpu: "2"
             memory: 2Gi
+        # The WiredTiger cache is fixed: the data does not fit in memory (OBJECTIVE.md, Data).
+        args: ["--wiredTigerCacheSizeGB", "0.25"]
         ports:
         - containerPort: 27017
         volumeMounts:
@@ -1072,6 +1226,10 @@ spec:
       volumes:
       - name: mongodb-recommendation-path
         emptyDir: {}
+      - name: snapshots
+        hostPath:
+          path: /var/lib/hotel-k8s/snapshots
+          type: Directory
       hostname: mongodb-recommendation
       restartPolicy: Always
       terminationGracePeriodSeconds: 5
@@ -1118,6 +1276,37 @@ spec:
         service: mongodb-reservation
         app: mongodb-reservation
     spec:
+      # The data: a copy of the node's snapshot of reservation-db (snapshot.py), made before mongod
+      # starts; this sample's writes stay in the emptyDir.
+      initContainers:
+      - name: restore
+        image: docker.io/mongo:5.0@sha256:41108d183e972dcbf98d09ed83f6cfc89a471a3f15d06f9d64a95e45d9db8dd2
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -c
+        - |
+          set -eu
+          src=/snapshots/@DATA_SNAPSHOT_VERSION@/reservation-db
+          if [ ! -f "$src/COMPLETE" ]; then
+            echo "the snapshot $src is not complete: the data Job (snapshot.py) builds it" >&2
+            exit 1
+          fi
+          cp -a "$src/db/." /data/db/
+          chown -R 999:999 /data/db
+        resources:
+          requests:
+            cpu: "2"
+            memory: 2Gi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        volumeMounts:
+        - mountPath: /data/db
+          name: mongodb-reservation-path
+        - mountPath: /snapshots
+          name: snapshots
+          readOnly: true
       containers:
       - name: "hotel-reserv-reservation-mongo"
         image: docker.io/mongo:5.0@sha256:41108d183e972dcbf98d09ed83f6cfc89a471a3f15d06f9d64a95e45d9db8dd2
@@ -1129,6 +1318,8 @@ spec:
           limits:
             cpu: "2"
             memory: 2Gi
+        # The WiredTiger cache is fixed: the data does not fit in memory (OBJECTIVE.md, Data).
+        args: ["--wiredTigerCacheSizeGB", "0.25"]
         ports:
         - containerPort: 27017
         volumeMounts:
@@ -1137,6 +1328,10 @@ spec:
       volumes:
       - name: mongodb-reservation-path
         emptyDir: {}
+      - name: snapshots
+        hostPath:
+          path: /var/lib/hotel-k8s/snapshots
+          type: Directory
       hostname: mongodb-reservation
       restartPolicy: Always
       terminationGracePeriodSeconds: 5
@@ -1183,6 +1378,37 @@ spec:
         service: mongodb-user
         app: mongodb-user
     spec:
+      # The data: a copy of the node's snapshot of user-db (snapshot.py), made before mongod
+      # starts; this sample's writes stay in the emptyDir.
+      initContainers:
+      - name: restore
+        image: docker.io/mongo:5.0@sha256:41108d183e972dcbf98d09ed83f6cfc89a471a3f15d06f9d64a95e45d9db8dd2
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -c
+        - |
+          set -eu
+          src=/snapshots/@DATA_SNAPSHOT_VERSION@/user-db
+          if [ ! -f "$src/COMPLETE" ]; then
+            echo "the snapshot $src is not complete: the data Job (snapshot.py) builds it" >&2
+            exit 1
+          fi
+          cp -a "$src/db/." /data/db/
+          chown -R 999:999 /data/db
+        resources:
+          requests:
+            cpu: "2"
+            memory: 2Gi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        volumeMounts:
+        - mountPath: /data/db
+          name: mongodb-user-path
+        - mountPath: /snapshots
+          name: snapshots
+          readOnly: true
       containers:
       - name: "hotel-reserv-user-mongo"
         image: docker.io/mongo:5.0@sha256:41108d183e972dcbf98d09ed83f6cfc89a471a3f15d06f9d64a95e45d9db8dd2
@@ -1194,6 +1420,8 @@ spec:
           limits:
             cpu: "2"
             memory: 2Gi
+        # The WiredTiger cache is fixed: the data does not fit in memory (OBJECTIVE.md, Data).
+        args: ["--wiredTigerCacheSizeGB", "0.25"]
         ports:
         - containerPort: 27017
         volumeMounts:
@@ -1202,6 +1430,10 @@ spec:
       volumes:
       - name: mongodb-user-path
         emptyDir: {}
+      - name: snapshots
+        hostPath:
+          path: /var/lib/hotel-k8s/snapshots
+          type: Directory
       hostname: mongodb-user
       restartPolicy: Always
       terminationGracePeriodSeconds: 5

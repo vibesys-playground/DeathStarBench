@@ -1,10 +1,15 @@
-"""dataset.py: the seeded documents and the dataset's shape.
+"""dataset.py: the dataset file (the spec the Go generator generates the data from).
 
-    python -m unittest discover -s tests      (needs vibesys-evaluator and pymongo's bson)
+    python -m unittest discover -s tests      (needs vibesys-evaluator)
 """
 
+import json
+import re
+import subprocess
 import sys
+import tempfile
 import unittest
+from dataclasses import fields
 from pathlib import Path
 
 TASK_DIR = Path(__file__).resolve().parent.parent
@@ -12,30 +17,36 @@ sys.path.insert(0, str(TASK_DIR))
 
 import dataset as ds  # noqa: E402
 
-# The documents digest of the task's earlier Go generator and seed for the same
-# SEED (evaluator cmd/seed --summary-only at the commit before the port): the
-# Python generator writes exactly the same MongoDB documents.
-GO_SEED_DOCUMENTS_DIGEST = "7670033f806863ce76f47d2ba5922e04f5d9496ab5f339190affe5c634bb5cc6"
-
-DATA = ds.generate()
+GO_DATASET = TASK_DIR / "evaluator" / "internal" / "dataset" / "dataset.go"
 
 
 class DatasetTest(unittest.TestCase):
-    def test_documents_equal_the_go_seeds(self):
-        self.assertEqual(ds.documents_digest(ds.documents(DATA)), GO_SEED_DOCUMENTS_DIGEST)
+    def test_the_file_is_what_vibesys_evaluator_writes(self):
+        from vibesys_evaluator._private import dataset as dataset_file  # noqa: PLC0415
 
-    def test_shape(self):
-        self.assertEqual(len(DATA.hotels), ds.HOTEL_COUNT)
-        self.assertEqual(len({u.username for u in DATA.users}), ds.USER_COUNT)
-        self.assertEqual(sorted(i for c in DATA.cities for i in c.hotels), list(range(ds.HOTEL_COUNT)))
-        self.assertEqual(len({(h.lat, h.lon) for h in DATA.hotels}), ds.HOTEL_COUNT)
-        for hotel in DATA.hotels[:500]:
-            self.assertEqual(hotel.rate_plans[0].code, "RACK")
-            self.assertEqual(hotel.price, min(p.total_rate for p in hotel.rate_plans))
-            self.assertEqual(DATA.cities[hotel.city].hotels[hotel.popularity - 1], int(hotel.id) - 1)
+        self.assertEqual(dataset_file.encode(ds.generate()), ds.encode(ds.SPEC))
 
-    def test_pure(self):
-        self.assertEqual(ds.generate().users[:50], DATA.users[:50])
+    def test_the_spec_is_the_go_generators(self):
+        """Field names and the format are the Go Spec's (whose ParseSpec rejects others)."""
+        source = GO_DATASET.read_text()
+        spec = re.search(r"type Spec struct \{(.*?)\n\}", source, re.S).group(1)
+        self.assertEqual(re.findall(r'json:"([a-z_]+)"', spec), [f.name for f in fields(ds.Spec)])
+        self.assertEqual(int(re.search(r"\bFormat\s*=\s*(\d+)", source).group(1)), ds.FORMAT)
+        self.assertEqual(ds.SPEC.format, ds.FORMAT)
+
+    def test_the_dataset_is_large(self):
+        """The task's data is about ten times the candidate's memory (OBJECTIVE.md, Data)."""
+        self.assertEqual(ds.SPEC.hotels, 1_500_000)
+        self.assertEqual(ds.SPEC.users, 500_000)
+
+    def test_pure_and_written_by_the_script(self):
+        self.assertIs(ds.generate(), ds.generate())
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / "dataset.json"
+            subprocess.run([sys.executable, str(TASK_DIR / "dataset.py"), str(path)], check=True)
+            self.assertEqual(path.read_bytes(), ds.encode(ds.SPEC))
+            self.assertEqual(json.loads(path.read_text()), {
+                "format": ds.FORMAT, "seed": ds.SPEC.seed, "hotels": ds.SPEC.hotels, "users": ds.SPEC.users})
 
 
 if __name__ == "__main__":

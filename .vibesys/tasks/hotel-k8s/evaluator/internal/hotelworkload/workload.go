@@ -10,7 +10,7 @@
 //
 // Request distributions (each draw from the operation's own stream): locations by city
 // popularity (Zipf, s = 1) with normal offsets of the city's hotel spread, written with 5
-// decimals; stays of 1-7 nights (skewed short) in the 2027 rate window; users by Zipf rank
+// decimals; stays of 1-7 nights (skewed short) in the 2027-2028 rate window; users by Zipf rank
 // (s = 0.75); hotels for rates, reservations and writes by popularity (a city by Zipf rank, then
 // a hotel by Zipf rank, s = 0.75, within it). About 1% of the mix are admin writes.
 //
@@ -95,7 +95,7 @@ func NewModel(data *dataset.Dataset, rand *workload.Rand) (*Model, error) {
 	ref := hotel.NewReference(data)
 	m := &Model{
 		data: data, ref: ref, state: hotel.NewState(ref),
-		managed:      make([]bool, len(data.Hotels)),
+		managed:      make([]bool, data.HotelCount()),
 		profiles:     workload.NewVersions[string, hotel.Profile](StalenessBound),
 		prices:       workload.NewVersions[hotel.PlanKey, hotel.Prices](StalenessBound),
 		rooms:        workload.NewVersions[string, int](StalenessBound),
@@ -155,7 +155,7 @@ func (m *Model) popular(rand *workload.Rand) (city, rank int) {
 
 func (m *Model) popularHotel(rand *workload.Rand) *dataset.Hotel {
 	city, rank := m.popular(rand)
-	return &m.data.Hotels[m.data.Cities[city].Hotels[rank]]
+	return m.data.Hotel(m.data.Cities[city].Hotels[rank])
 }
 
 // pickHotel is a popular hotel that eligible accepts: attempts draws, then the first draw's
@@ -328,17 +328,17 @@ func (m *Model) reserveCapacity(rand *workload.Rand) workload.Request {
 	}
 	used := m.used[night]
 	index := m.pickHotel(rand, reservationAttempts, func(i int) bool { return !used[i] && !m.managed[i] })
-	h := &m.data.Hotels[index]
+	id, capacity := dataset.HotelID(index), m.data.Capacity(index)
 	u := m.user(rand.Child("user"))
 	in := m.firstNight.AddDate(0, 0, night)
 	common := []workload.Option{query("inDate", day(in)), query("outDate", day(in.AddDate(0, 0, 1))),
-		query("hotelId", h.ID), query("customerName", fmt.Sprintf("vibesys-%016x", rand.Uint64()&customerMask)),
+		query("hotelId", id), query("customerName", fmt.Sprintf("vibesys-%016x", rand.Uint64()&customerMask)),
 		query("username", u.Username), query("password", u.Password)}
 	with := func(rooms string) []workload.Option {
 		return append(append([]workload.Option(nil), common...), query("number", rooms))
 	}
 	return workload.Request{
-		Steps:     []workload.Step{get("/reservation", with(strconv.Itoa(h.Capacity))...), get("/reservation", with("1")...)},
+		Steps:     []workload.Step{get("/reservation", with(strconv.Itoa(capacity))...), get("/reservation", with("1")...)},
 		Info:      reservationInfo{Slot: slot, Hotel: index},
 		Exclusive: "reservation",
 	}
@@ -378,11 +378,16 @@ func (m *Model) updateProfile(rand *workload.Rand) workload.Request {
 	}
 }
 
-// setCapacity sets a capacity-managed hotel's rooms to 0.5-2x the seeded ones, then reserves
-// one room more: rejected at once.
+// setCapacity sets a capacity-managed hotel's rooms to 0.5-2x the seeded ones, and above the
+// most rooms its seeded bookings hold on a night (so the write is accepted and every night
+// keeps a room), then reserves one room more: rejected at once.
 func (m *Model) setCapacity(rand *workload.Rand) workload.Request {
-	h := &m.data.Hotels[m.pickHotel(rand, writeAttempts, func(i int) bool { return m.managed[i] })]
-	low, high := max(1, h.Capacity/2), 2*h.Capacity
+	index := m.pickHotel(rand, writeAttempts, func(i int) bool { return m.managed[i] })
+	h := struct {
+		ID       string
+		Capacity int
+	}{dataset.HotelID(index), m.data.Capacity(index)}
+	low, high := max(1, h.Capacity/2, m.ref.SeededMaxRooms(h.ID)+1), 2*h.Capacity
 	rooms := low + int(rand.Random()*float64(high-low+1))
 	u := m.user(rand.Child("user"))
 	probe := []workload.Option{query("inDate", day(m.firstNight)), query("outDate", day(m.firstNight.AddDate(0, 0, 1))),
@@ -502,7 +507,7 @@ func (m *Model) applyReservation(call workload.Call) error {
 	if err != nil {
 		return err
 	}
-	if info.Hotel < 0 || info.Hotel >= len(m.data.Hotels) {
+	if info.Hotel < 0 || info.Hotel >= m.data.HotelCount() {
 		return fmt.Errorf("reservation of hotel index %d", info.Hotel)
 	}
 	m.nextSlot = max(m.nextSlot, info.Slot+1)

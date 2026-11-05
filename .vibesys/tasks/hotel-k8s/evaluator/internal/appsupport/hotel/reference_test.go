@@ -39,9 +39,10 @@ type goldenPoint struct {
 }
 
 func geoPoints(data *dataset.Dataset) ([]goldenPoint, string) {
-	points := make([]goldenPoint, len(data.Hotels))
-	for index, hotel := range data.Hotels {
-		points[index] = goldenPoint{hotel.ID, hotel.Lat, hotel.Lon}
+	points := make([]goldenPoint, data.HotelCount())
+	for index := range points {
+		lat, lon := data.Location(index)
+		points[index] = goldenPoint{dataset.HotelID(index), lat, lon}
 	}
 	encoded, err := json.Marshal(points)
 	if err != nil {
@@ -65,7 +66,7 @@ func goldenQueries(data *dataset.Dataset) (nearby, nearest [][2]string) {
 		nearby = append(nearby, near(n, 1, 5))
 	}
 	for n := uint64(0); n < 300; n++ {
-		hotel := data.Hotels[int(dataset.Mix(n, 9)%uint64(len(data.Hotels)))]
+		hotel := data.Hotel(int(dataset.Mix(n, 9) % uint64(data.HotelCount())))
 		nearby = append(nearby, [2]string{strconv.FormatFloat(hotel.Lat, 'f', -1, 64), strconv.FormatFloat(hotel.Lon, 'f', -1, 64)})
 	}
 	for n := uint64(0); n < 200; n++ {
@@ -78,7 +79,7 @@ func goldenQueries(data *dataset.Dataset) (nearby, nearest [][2]string) {
 		nearest = append(nearest, near(n+30000, 1, 5))
 	}
 	for n := uint64(0); n < 100; n++ {
-		hotel := data.Hotels[int(dataset.Mix(n, 11)%uint64(len(data.Hotels)))]
+		hotel := data.Hotel(int(dataset.Mix(n, 11) % uint64(data.HotelCount())))
 		nearest = append(nearest, [2]string{strconv.FormatFloat(hotel.Lat, 'f', -1, 64), strconv.FormatFloat(hotel.Lon, 'f', -1, 64)})
 	}
 	return nearby, nearest
@@ -158,7 +159,7 @@ func bruteForceNearby(data *dataset.Dataset, lat, lon float64) []string {
 		distance float64
 	}
 	var candidates []candidate
-	for _, hotel := range data.Hotels {
+	for _, hotel := range allHotels(data) {
 		if distance := haversineMeters(lat, lon, hotel.Lat, hotel.Lon); distance <= 10000 {
 			candidates = append(candidates, candidate{hotel.ID, distance})
 		}
@@ -221,7 +222,7 @@ func TestNearestHotelsMatchesBruteForce(t *testing.T) {
 		query := geoPoint{lat: lat, lon: lon}
 		best := math.MaxFloat64
 		var ids []string
-		for _, hotel := range data.Hotels {
+		for _, hotel := range allHotels(data) {
 			distance := geoDistance(query, geoPoint{lat: hotel.Lat, lon: hotel.Lon}) / 1000
 			if distance < best {
 				best, ids = distance, []string{hotel.ID}
@@ -238,7 +239,7 @@ func TestNearestHotelsMatchesBruteForce(t *testing.T) {
 		case 0: // anywhere on the globe
 			lat, lon = -80+160*dataset.Unit(n, 1), -180+360*dataset.Unit(n, 2)
 		case 1: // a hotel location
-			hotel := data.Hotels[int(dataset.Mix(n, 3)%uint64(len(data.Hotels)))]
+			hotel := data.Hotel(int(dataset.Mix(n, 3) % uint64(data.HotelCount())))
 			lat, lon = hotel.Lat, hotel.Lon
 		default: // near a city centre
 			city := data.Cities[int(dataset.Mix(n, 4)%uint64(len(data.Cities)))]
@@ -255,11 +256,11 @@ func TestNearestHotelsMatchesBruteForce(t *testing.T) {
 func TestRecommendationsByRateAndPriceMatchBruteForce(t *testing.T) {
 	data := dataset.Default()
 	maxRating, minPrice := 0.0, math.MaxFloat64
-	for _, hotel := range data.Hotels {
+	for _, hotel := range allHotels(data) {
 		maxRating, minPrice = math.Max(maxRating, hotel.Rating), math.Min(minPrice, hotel.Price)
 	}
 	var best, cheapest []string
-	for _, hotel := range data.Hotels {
+	for _, hotel := range allHotels(data) {
 		if hotel.Rating == maxRating {
 			best = append(best, hotel.ID)
 		}
