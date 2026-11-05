@@ -334,3 +334,29 @@ func TestSandboxReadsSeeTheAdditionsTheWritesAllow(t *testing.T) {
 		t.Error("a distance recommendation without the acknowledged addition passed")
 	}
 }
+
+// BenchmarkBuild is the cost of drawing one operation of the mix and building its request (the
+// generator's stream adds its encoding).
+func BenchmarkBuild(b *testing.B) {
+	m, err := NewModel(dataset.Default(), workload.NewRand(7, "model"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	w := Workload()
+	weights := make([]float64, len(w.Operations))
+	for i, op := range w.Operations {
+		weights[i] = op.Weight
+	}
+	stream := workload.NewRand(7, "phase", 0)
+	b.ResetTimer()
+	for n := range b.N {
+		op := &w.Operations[stream.Weighted(weights)]
+		request := op.Build(m, stream.Child(n))
+		if op.Apply != nil {
+			info, _ := json.Marshal(request.Info)
+			if err := op.Apply(m, pending(info)); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+}
