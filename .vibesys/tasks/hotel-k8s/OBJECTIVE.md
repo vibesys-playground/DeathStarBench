@@ -17,43 +17,87 @@ latency is a win; a change that trades one for the other is a tradeoff, not a pr
 
 You may change only code under `hotelReservation/`: the Go services in `services/`,
 `cmd/`, `dialer/`, `registry/`, `tracing/`, `tune/`, `tls/`, `lease/`, `changes/`,
-`internal/`, the module and its
-`vendor/` tree, and `hotelReservation/Dockerfile` (it builds the one image that all
-eight application services run). Do not touch `.vibesys/`.
+`internal/`, the module and its `vendor/` tree, `hotelReservation/Dockerfile` (it builds
+the one image that every application container runs), and the application tier's
+manifest `hotelReservation/deploy/app.yaml` (see Resources). Do not touch `.vibesys/`.
 
 The task owns everything else, and a candidate cannot change it:
 
 - the data: the task generates its dataset and writes it into the six MongoDB
   databases before your services start (see Data below);
-- the Kubernetes manifests (`k8s/manifest.yaml`): the topology of 8 application
-  services, 6 MongoDB, 3 memcached, consul and jaeger, replica counts (2 instances of
-  each application service, 1 of everything else), the service config files and
-  environment variables of each application pod, and the resources below;
+- the data tier and its resources (`k8s/manifest.yaml`): 6 MongoDB at 2 CPU / 2 GiB
+  each, 3 memcached at 1 CPU / 1 GiB each, consul at 1 CPU / 512 MiB and jaeger at
+  2 CPU / 1 GiB, one replica each, so that the stores are not the bottleneck and a
+  candidate cannot buy speed by shrinking them; the services' ConfigMaps (`frontend`,
+  `geo`, `profile`, `rate`, `recommendation`, `reservation`, `search`, `user`, each with
+  the `service-config.json` of the data tier's addresses); and the `frontend` Service
+  (port 5000, selecting the pods labelled `app.kubernetes.io/name: frontend`,
+  `app.kubernetes.io/instance: hotel`, `service: frontend`), through which the load
+  generator and the oracle reach the application;
 - the load generator, the workloads, the open loop's offered rate (70% of the sample's own
   closed-loop throughput, so a faster candidate is held to proportionally more load), and the
   semantic oracle.
 
-Resources are fixed. Every application pod gets exactly 1 CPU (request = limit) and
-2 GiB: 16 application CPUs in 16 pods. The data and cache tiers have fixed limits so they are not the bottleneck:
-each MongoDB 2 CPU / 2 GiB, each memcached 1 CPU / 1 GiB, consul 1 CPU / 512 MiB,
-jaeger 2 CPU / 1 GiB. The manifest also sets `GOMAXPROCS` of every application container to its CPU limit
-(1), as an operator would: the Go 1.21 runtime in the image does not read the cgroup
-quota, and with the node's full core count it burns the quota in a few milliseconds
-and is throttled for the rest of each 100 ms period. You cannot add or remove replicas or CPU; a gain must come from the code
-using its CPU better (fewer allocations and syscalls, cheaper serialization, smarter
-caching and batching, less work on the request path, connection and goroutine use,
-fewer or merged internal RPCs, Go runtime settings that the code itself can set).
+## Resources
+
+The application tier has a fixed capacity: **16 CPUs and 32 GiB in total** across all
+application pods (each container's requests equal its limits). You choose how the eight
+services' code is grouped into Deployments, how many replicas each Deployment runs (at
+least 2, so that any one pod can restart without losing service), and how the 16 CPUs and
+32 GiB are split among them. The data tier (6 MongoDB, 3 memcached, consul, jaeger) and its
+resources stay as given. GOMAXPROCS of each application container must equal its CPU limit.
+
+`hotelReservation/deploy/app.yaml` is that tier: Kubernetes Deployments, Services and
+ConfigMaps, applied after the task's data tier has been seeded. The base gives the
+reference topology: eight Deployments (one per service) of 2 pods at 1 CPU / 2 GiB each,
+and a Service per gRPC service. Before it builds or deploys anything, the check and the
+benchmark validate the file, and a candidate that breaks a rule fails with a message that
+names the object and key:
+
+- the CPU limits, summed over every container of every replica, are at most 16, and the
+  memory limits at most 32 GiB; every container sets `requests` equal to `limits` for
+  `cpu` and `memory` (nothing else), at least 100m CPU and 64 MiB, CPU in whole millicores;
+- every Deployment sets `replicas` to at least 2;
+- every container sets `GOMAXPROCS` once, to its CPU limit rounded up: the literal value
+  (`"1"` for a limit of 500m or 1, `"2"` for 1500m or 2), or, as the base does, the downward
+  API (`valueFrom.resourceFieldRef: {resource: limits.cpu, divisor: "1"}`, which Kubernetes
+  rounds up the same way). The Go 1.21 runtime in the image does not read the cgroup quota:
+  with the node's full core count it burns the quota in a few milliseconds and is throttled
+  for the rest of each 100 ms period;
+- every container runs the candidate image, `image: ${HOTEL_IMAGE}` (the one image built
+  from `hotelReservation/Dockerfile`); `${NAMESPACE}` and `${HOTEL_IMAGE}` are the only
+  variables;
+- only Deployments (`apps/v1`), Services and ConfigMaps (`v1`), in the job's namespace
+  (`metadata.namespace` absent or `${NAMESPACE}`), named differently from the task's
+  objects above, without the labels `tier` and `backend` (the task's own);
+- no init containers, host namespaces (`hostNetwork`, `hostPID`, `hostIPC`), node
+  selection (`nodeName`, `nodeSelector`, `affinity`, `tolerations` other than empty),
+  priority or runtime classes, privileges (`privileged`, added capabilities, privilege
+  escalation), `hostPort`, `envFrom`, or volumes other than `configMap` and `emptyDir`
+  (so no `hostPath` and no persistent volume claims); pods run as the namespace's default
+  service account, which may do nothing; Services are `ClusterIP` (or headless);
+- a Deployment's `selector.matchLabels` selects its own pods and no other Deployment's,
+  and no pod carries the selector of a task Service other than `frontend`;
+- at least one Deployment's pods carry the `frontend` Service's labels and serve HTTP on
+  port 5000: the load generator and the oracle send every request there.
+
+So a gain may come from the code using its CPU better (fewer allocations and syscalls,
+cheaper serialization, smarter caching and batching, less work on the request path,
+connection and goroutine use, fewer or merged internal RPCs, Go runtime settings that the
+code itself can set), or from placing the capacity where the load is: more CPU for the
+services at their limit and less for those that idle, other replica counts, or services
+merged into one process or one pod so that their calls stay local.
 
 ## Replicas
 
-Each application service runs as two instances (pods) behind its Kubernetes Service
-(the frontend) or its consul name (the gRPC services, which clients round-robin over).
-Any instance may serve any request: the load generator and the oracle reach both
-frontend instances, and every internal call may land on either instance of the
-callee. State that must be shared lives in MongoDB or memcached, or is kept coherent
-within the staleness bound below. The oracle restarts single instances (one pod of
-each service while the other keeps serving) and every instance at once; neither may
-lose an acknowledged write or bring back an older value.
+Each application Deployment runs at least two pods, behind the `frontend` Service (the
+pods that carry its labels) or behind consul names (the gRPC services, which clients
+round-robin over). Any instance may serve any request: the load generator and the oracle
+reach every frontend pod, and every internal call may land on any instance of the callee.
+State that must be shared lives in MongoDB or memcached, or is kept coherent within the
+staleness bound below. The oracle restarts single instances (one pod of each application
+Deployment while the others keep serving) and every instance at once; neither may lose an
+acknowledged write or bring back an older value.
 
 ## Data
 
@@ -116,19 +160,19 @@ The contract:
 
 The check deploys the candidate and runs the Go semantic oracle in accuracy mode,
 inside the cluster against the frontend Service, opening a new connection for every
-request so that its reads reach both frontend instances. It passes only if every observation matches the reference behavior of the pinned
+request so that its reads reach every frontend pod. It passes only if every observation matches the reference behavior of the pinned
 application: the four frontend routes `/hotels`, `/recommendations`, `/user`,
 `/reservation` with exact response schemas and values over the task's dataset and the
 writes made so far; the owner routes and `/rates` with the contract above (the oracle
 reads every write at 1 s plus a margin, at least eight times so the reads reach every
-instance, and again after restarting one instance of every stateless service and then
+instance, and again after restarting one pod of every application Deployment and then
 all of them); reservation capacity by hotel and night (atomic, over-capacity
 rejection, no overselling of sequential requests, and a concurrent burst on one night
 accepts exactly the rooms left); degenerate date ranges; concurrent isolation; and
-durability: acknowledged reservations survive a restart of every instance of the
-stateless services and of the reservation cache tier, and a restart of one instance of
-each. A restart deletes the pods (1 s grace) and waits until their replacements are
-ready (below) before the oracle reads again.
+durability: acknowledged reservations survive a restart of every application pod and of
+the reservation cache tier, and a restart of one pod of each application Deployment and
+of the reservation cache. A restart deletes the pods (1 s grace) and waits until their
+replacements are ready (below) before the oracle reads again.
 `/reservation` still reaches the reservation service after an invalid login, as in
 the pinned reference. The load generator checks every response of the benchmark the same
 way, accepting for each read exactly the values the contract allows given the writes it
@@ -148,17 +192,19 @@ The reference semantics include these details, which an optimization must keep:
 ## Start and readiness contract
 
 The wrapper builds the image from `hotelReservation/Dockerfile` (build context:
-`hotelReservation/`) and starts each service with `command: /go/bin/<service>` and
-`/workspace/config.json` mounted from the task's config map. So the Dockerfile must
-leave the service binaries at `/go/bin/{frontend,geo,profile,rate,recommendation,
-reservation,search,user}`, and `/go/bin/<service>` must read `/workspace/config.json`
-for its addresses. Service-to-service discovery stays on consul (every instance of a
-gRPC service registers at its pod IP), tracing stays on jaeger (`jaegerAddress`), and
-the frontend listens on port 5000. The deployment is ready when every replica of
-every Deployment is Ready, every instance of the seven gRPC services is registered in
-consul at its pod IP, and `/user`, `/recommendations` and `/hotels` return HTTP 200 on
-each frontend pod; the same holds after every restart. A candidate that does not
-become ready in 300 seconds fails.
+`hotelReservation/`) and applies `hotelReservation/deploy/app.yaml` with `${HOTEL_IMAGE}`
+set to it. The base starts each service with `command: /go/bin/<service>` and mounts the
+task's ConfigMap of that name at `/workspace/config.json`, which holds the data tier's
+addresses; a candidate may mount any of the task's ConfigMaps (they are identical) or one
+of its own. Service-to-service discovery stays on consul (`consulAddress`), tracing stays
+on jaeger (`jaegerAddress`), and the frontend listens on port 5000. The deployment is
+ready when every replica of every Deployment is Ready, every pod of a Deployment that
+registers in consul is registered at its pod IP (a Deployment counts as registering when
+any of its pods is; one that serves no gRPC need not register), and `/user`,
+`/recommendations` and `/hotels` return HTTP 200 on each pod behind the `frontend`
+Service; the same holds after every restart (a Deployment whose pods were registered
+before a restart must have its replacements registered). A candidate that does not become
+ready in 300 seconds fails.
 
 ## Rules
 
@@ -174,5 +220,5 @@ become ready in 300 seconds fails.
 - Do not detect the benchmark or the check (by user agent, request pattern, namespace
   or environment) and behave differently.
 - Do not depend on the cluster, host or network beyond the manifests; one candidate
-  image runs all eight services.
+  image runs every application container.
 - The candidate may not read or write anything outside its pods.
