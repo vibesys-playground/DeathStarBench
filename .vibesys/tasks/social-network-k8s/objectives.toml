@@ -1,0 +1,12 @@
+[[objective]]
+name = "operations_per_second"
+direction = "max"
+relative_noise = 0.05   # placeholder from hotel-k8s; set from the base measure
+
+[[objective]]
+name = "latency_ms.p99"
+direction = "min"
+relative_noise = 0.10   # placeholder from hotel-k8s; set from the base measure
+
+[pareto]
+relative_noise = 0.10

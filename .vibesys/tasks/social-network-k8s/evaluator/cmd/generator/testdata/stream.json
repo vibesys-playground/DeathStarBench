@@ -1,0 +1,17 @@
+{
+  "about": "the generator's stream for these phases: SHA-256 over its frames (4-byte little-endian length, then the frame) after the FileHeader: the RequestsHeader and the first operations; and over its kept records of those operations. Recorded by TestTheStreamIsPinned with SN_STREAM_RECORD=1.",
+  "phases": [
+    {
+      "phase_input": "phase0.binpb",
+      "operations": 30000,
+      "stream_sha256": "3edd92e96dd40d51598b574f332b6cb325a0f44f5c5679f9ead41d647a222f07",
+      "kept_sha256": "51b9abdb0e46e6992324a652dfd528b46a6162e4f0dd7e640da3a574d19b8dbd"
+    },
+    {
+      "phase_input": "phase1.binpb",
+      "operations": 60000,
+      "stream_sha256": "5633128ce3098e70a0ecfb49defbc5664d1427b555ba9bcc867876c834f0cc6a",
+      "kept_sha256": "23496691a1dd28f18fef9a83f9242e206ccecd4997e70eddf4ac1119c93de980"
+    }
+  ]
+}

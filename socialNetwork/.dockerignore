@@ -7,3 +7,7 @@
 !/scripts/
 !/third_party/
 !/wrk2/
+!/config/
+!/docker/openresty-thrift/lua-thrift/
+!/gen-lua/
+!/nginx-web-server/

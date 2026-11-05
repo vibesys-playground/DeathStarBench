@@ -5,7 +5,7 @@ repository root and select one of the directories under `tasks/`:
 
 ```bash
 vibesys --task hotel-reservation
-vibesys --task social-network-read-timeline
+vibesys --task social-network-k8s
 ```
 
 Task definitions and `evaluators.lock` are authored input. VibeSys owns

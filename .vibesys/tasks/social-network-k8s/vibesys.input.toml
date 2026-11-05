@@ -1,0 +1,22 @@
+version = 1
+backends = ["cpu"]
+
+[agent]
+domain = "microservices"
+
+[environment]
+needs = ["kubernetes"]
+
+# Both commands run the trusted task code baked into the task image at /task; they
+# read KUBECONFIG, VIBESYS_K8S_REGISTRY and VIBESYS_K8S_BUILDER from the environment.
+# The check is run.py (the Go checker over the oracle); the benchmark is bench.py, on
+# vibesys-evaluator (one sample per run), whose generator checks with the same oracle.
+# A cold build of the C++ services takes most of the first job's time.
+[accuracy]
+command = ["python", "/task/run.py", "check", "--project-root", "${PROJECT_ROOT}"]
+timeout_seconds = 2700
+
+[benchmark]
+command = ["python", "/task/bench.py", "benchmark", "--project-root", "${PROJECT_ROOT}"]
+timeout_seconds = 2700
+result_protocol = 2
