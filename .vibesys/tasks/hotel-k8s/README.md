@@ -39,13 +39,13 @@ is a candidate input: the CLI versions these files as the task.
    `http://frontend:5000`. Every oracle request asks for its own connection (`Connection: close`),
    so kube-proxy spreads the reads, the repeated reads of the visibility checks included, over
    both frontend pods; internal gRPC round-robins over consul. Its restart hook
-   (`--restart-command-json`, see below) is `podctl ... restart`. Exit 0 is a pass. Afterwards
-   the job logs every application pod's CPU seconds and network bytes from the kubelet summary
-   (`pod-usage-check.json`): pods replaced by the last restart show what they served since.
+   (`--restart-command-json`, see below) is `podctl ... restart`. Exit 0 is a pass.
    `benchmark`: draws fresh seeds (below), runs two load-generator Jobs inside the namespace
    against `http://frontend:5000`: `closed` (operations per second) then `open` (p99 latency at
-   70% of the closed loop's throughput), logging per-pod usage after each. One protocol-2 result
-   carries both.
+   70% of the closed loop's throughput). After each phase it logs every application pod's CPU
+   seconds and network bytes from the kubelet summary (`pod-usage-closed.json`,
+   `pod-usage-open.json`; cumulative), so the load on each replica is visible. One protocol-2
+   result carries both.
 5. Deletes the namespace on every exit path the process can see: normal end, error, SIGTERM,
    SIGINT and SIGHUP. The CLI ends a cancelled or timed-out job with SIGKILL (host: the process
    group; docker: `docker rm --force`), which no handler can see, so the namespace leaks. Each

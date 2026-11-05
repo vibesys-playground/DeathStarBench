@@ -531,7 +531,6 @@ def do_check(project_root: Path, scratch: Path) -> int:
     if artifacts:
         (artifacts / "oracle.log").write_text(logs)
     sys.stderr.write(logs if len(logs) < 20000 else logs[:4000] + "\n...\n" + logs[-12000:])
-    report_pod_usage(deployment, artifacts, "check")
     log("semantic oracle " + ("passed" if succeeded else "failed"))
     return 0 if succeeded else 1
 
