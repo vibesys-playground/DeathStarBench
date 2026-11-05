@@ -735,10 +735,6 @@ CLIENTS = 32
 CLOSED_TRIALS, CLOSED_SECS, CLOSED_WARMUP = 2, 60, 15
 OPEN_TRIALS, OPEN_SECS, OPEN_WARMUP = 3, 60, 10
 OPEN_LOOP_LOAD_FRACTION = 0.7
-# The closed loop's plan is sized for this many operations/s (a faster
-# candidate's phase is rerun once with a larger plan); later trials plan for
-# twice what the earlier ones reached.
-MIN_PLANNED_OPS_PER_SEC = 2000.0
 
 
 def benchmark(run: vse.Run) -> None:
@@ -749,12 +745,10 @@ def benchmark(run: vse.Run) -> None:
     arrivals as before) at 0.7 x that throughput: the p99 is their median.
     The sample's writes carry from phase to phase, so nothing is reset.
     """
-    closed: list[float] = []
-    planned = MIN_PLANNED_OPS_PER_SEC
-    for _ in range(CLOSED_TRIALS):
-        phase = run.closed_loop(clients=CLIENTS, secs=CLOSED_SECS, warmup=CLOSED_WARMUP, max_ops_per_sec=planned)
-        closed.append(phase.ops_per_sec)
-        planned = max(planned, 2 * phase.ops_per_sec)
+    closed = [
+        run.closed_loop(clients=CLIENTS, secs=CLOSED_SECS, warmup=CLOSED_WARMUP).ops_per_sec
+        for _ in range(CLOSED_TRIALS)
+    ]
     throughput = statistics.median(closed)
     # p99 is measured at a fixed fraction of this sample's own throughput, so
     # a faster candidate is held to proportionally more load.
