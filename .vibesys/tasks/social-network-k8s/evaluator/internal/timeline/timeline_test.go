@@ -32,7 +32,7 @@ func TestParseAcceptsThePinnedEncoding(t *testing.T) {
 func TestWindow(t *testing.T) {
 	describe := func(i int) string { return "candidate" }
 	// Candidates 0..4 with timestamps 50, 40, 30, 20, 10, all must.
-	musts := []Candidate{{50, true}, {40, true}, {30, true}, {20, true}, {10, true}}
+	musts := []Candidate{{Timestamp: 50, Must: true}, {Timestamp: 40, Must: true}, {Timestamp: 30, Must: true}, {Timestamp: 20, Must: true}, {Timestamp: 10, Must: true}}
 	check := func(candidates []Candidate, start, stop int, indices []int, wantErr string) {
 		t.Helper()
 		posts := make([]Post, len(indices))
@@ -59,14 +59,25 @@ func TestWindow(t *testing.T) {
 	check(musts, 5, 8, nil, "")
 	check(musts, 4, 8, nil, "empty")
 	// An optional post may be present or absent, and shifts the window.
-	optional := append([]Candidate{{55, false}}, musts...)
+	optional := append([]Candidate{{Timestamp: 55, Must: false}}, musts...)
 	check(optional, 0, 2, []int{0, 1}, "")
 	check(optional, 0, 2, []int{1, 2}, "")
 	check(optional, 1, 3, []int{1, 2}, "")
 	check(optional, 1, 3, []int{2, 3}, "")
 	check(optional, 2, 3, []int{1}, "too old")
 	// A post of unknown timestamp may sit anywhere.
-	unknown := append([]Candidate{{0, true}}, musts...)
+	unknown := append([]Candidate{{Timestamp: 0, Must: true}}, musts...)
 	check(unknown, 0, 2, []int{1, 2}, "")
 	check(unknown, 1, 3, []int{1, 2}, "")
+	// A post of unknown timestamp within known bounds.
+	newer := append([]Candidate{{Lo: 51, Hi: 70, Must: true}}, musts...)
+	check(newer, 0, 2, []int{1, 2}, "too new") // certainly newer than the page
+	check(newer, 1, 3, []int{1, 2}, "")
+	inside := append([]Candidate{{Lo: 31, Hi: 39, Must: true}}, musts...)
+	check(inside, 0, 3, []int{1, 2, 3}, "missing") // certainly between 40 and 20
+	older := append([]Candidate{{Lo: 1, Hi: 5, Must: true}}, musts...)
+	check(older, 3, 6, []int{4, 5}, "short page")
+	check(older, 3, 5, []int{4, 5}, "")
+	vague := append([]Candidate{{Lo: 1, Hi: 45, Must: true}}, musts...)
+	check(vague, 0, 2, []int{1, 2}, "") // may be anywhere below 45
 }

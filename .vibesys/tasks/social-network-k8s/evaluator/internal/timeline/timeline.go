@@ -185,10 +185,24 @@ func Describe(post *Post) string {
 // Candidate is one post the model allows in a timeline.
 type Candidate struct {
 	// Timestamp is the post's timestamp, or 0 while the model does not know
-	// it (a post composed but not yet seen); such a post may sit anywhere.
+	// it (a post composed but not yet seen). An unknown timestamp lies in
+	// [Lo, Hi] when Hi is set, and anywhere otherwise.
 	Timestamp int64
 	// Must: the post is certainly in the timeline; otherwise it may be.
 	Must bool
+	// Lo and Hi bound an unknown timestamp (Hi = 0: unbounded).
+	Lo, Hi int64
+}
+
+// bounds is the range the candidate's timestamp lies in.
+func (c Candidate) bounds() (lo, hi int64) {
+	switch {
+	case c.Timestamp != 0:
+		return c.Timestamp, c.Timestamp
+	case c.Hi != 0:
+		return c.Lo, c.Hi
+	}
+	return math.MinInt64, math.MaxInt64
 }
 
 // Window checks that page is timeline[start:stop] for some timeline holding
@@ -225,24 +239,37 @@ func Window(candidates []Candidate, page []Post, matched []int, start, stop int,
 		}
 		return nil
 	}
-	hi, lo := page[0].Timestamp, page[len(page)-1].Timestamp
-	before, maybeBefore := 0, 0
+	// A short page ends the timeline: every required post not in it precedes it.
+	hi, lo, short := page[0].Timestamp, page[len(page)-1].Timestamp, len(page) < want
+	before, maybeBefore, mustOutside := 0, 0, 0
 	for index, candidate := range candidates {
 		if inPage[index] {
 			continue
 		}
-		known := candidate.Timestamp != 0
-		switch {
-		case candidate.Must && known && candidate.Timestamp > hi:
-			before++
-			maybeBefore++
-		case !known || candidate.Timestamp >= hi:
-			maybeBefore++
-		case candidate.Must && candidate.Timestamp < hi && candidate.Timestamp > lo:
-			return fmt.Errorf("missing: %s lies within the page", describe(index))
-		case candidate.Must && candidate.Timestamp < lo && len(page) < want:
-			return fmt.Errorf("missing: %s is older than the short page's last post", describe(index))
+		low, high := candidate.bounds()
+		canBefore := high >= hi         // newer than the page's first post, or tied with it
+		canAfter := !short && low <= lo // older than the page's last post, or tied with it
+		if candidate.Must {
+			mustOutside++
+			if !canBefore && !canAfter {
+				if short && high < lo {
+					return fmt.Errorf("missing: %s is older than the short page's last post", describe(index))
+				}
+				if !short && low > lo {
+					return fmt.Errorf("missing: %s lies within the page", describe(index))
+				}
+				return fmt.Errorf("missing: %s belongs in the page", describe(index))
+			}
+			if low > hi {
+				before++
+			}
 		}
+		if canBefore {
+			maybeBefore++
+		}
+	}
+	if short && mustOutside > before {
+		before = mustOutside
 	}
 	if start < before {
 		return fmt.Errorf("page [%d, %d) starts too new: %d newer posts must precede %s", start, stop, before, Describe(&page[0]))
