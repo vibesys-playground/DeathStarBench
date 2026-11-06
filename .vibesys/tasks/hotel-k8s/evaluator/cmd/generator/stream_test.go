@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"flag"
 	"io"
 	"os"
@@ -14,7 +13,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	pb "github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen/gen/vibesys/evaluator/v1"
+	pb "github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go/gen/vibesys/evaluator/v1"
 	"google.golang.org/protobuf/proto"
 
 	"vibesys/hotel-k8s-evaluator/internal/dataset"
@@ -34,41 +33,11 @@ func TestMain(m *testing.M) {
 
 // update re-records testdata/stream.json from this generator (a deliberate change of the task's
 // requests, such as a new dataset): go test ./cmd/generator -run TestTheStream -args -update.
-// It also rewrites the history of every later phase input from the first phase's writes
-// (historyOf), so the history is one the dataset admits.
-var update = flag.Bool("update", false, "re-record testdata/stream.json and the later phases' histories")
+// It also clears the phase inputs' history, which generators no longer read.
+var update = flag.Bool("update", false, "re-record testdata/stream.json")
 
-// writes are the operations a phase's history holds.
-var writes = map[string]bool{
-	"add_hotel": true, "reserve_capacity": true, "set_capacity": true, "update_profile": true, "update_rate": true,
-}
-
-// historyOf is a history of the first phase's kept writes as a later phase receives it: the
-// first historyLimit of them, 30 seconds of calls from a fixed instant, every seventh failed (a
-// failed write's effect is unknown to the model, as a timeout's is).
-func historyOf(names []string, kept [][]byte) ([]*pb.HistoryEntry, error) {
-	const historyLimit = 422
-	var out []*pb.HistoryEntry
-	for _, record := range kept {
-		var op pb.KeptOperation
-		if err := proto.Unmarshal(record, &op); err != nil {
-			return nil, err
-		}
-		if name := names[op.GetOperation()]; writes[name] && len(out) < historyLimit {
-			out = append(out, &pb.HistoryEntry{Operation: name, InfoJson: op.GetInfoJson()})
-		}
-	}
-	const start, span, latency = int64(1_800_000_000_000_000_000), int64(30_000_000_000), int64(3_000_000)
-	for k, entry := range out {
-		entry.StartUnixNanos = start + int64(k)*span/int64(max(len(out), 1))
-		entry.EndUnixNanos = entry.StartUnixNanos + latency
-		entry.Ok = k%7 != 3
-	}
-	return out, nil
-}
-
-// rewriteHistory replaces the history of the phase input at path.
-func rewriteHistory(path string, history []*pb.HistoryEntry) error {
+// clearHistory drops the (no longer written) history of the phase input at path.
+func clearHistory(path string) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -77,7 +46,7 @@ func rewriteHistory(path string, history []*pb.HistoryEntry) error {
 	if err := proto.Unmarshal(raw, &phase); err != nil {
 		return err
 	}
-	phase.History = history
+	phase.History = nil
 	encoded, err := proto.MarshalOptions{Deterministic: true}.Marshal(&phase)
 	if err != nil {
 		return err
@@ -96,7 +65,6 @@ type golden struct {
 		PhaseInput   string `json:"phase_input"`
 		Operations   int    `json:"operations"`
 		StreamSHA256 string `json:"stream_sha256"`
-		KeptSHA256   string `json:"kept_sha256"`
 	} `json:"phases"`
 }
 
@@ -123,17 +91,8 @@ func sum(frames [][]byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// keptIndex is a KeptOperation's index: field 1, a varint written first, absent when 0.
-func keptIndex(record []byte) uint64 {
-	if len(record) == 0 || record[0] != 0x08 {
-		return 0
-	}
-	index, _ := binary.Uvarint(record[1:])
-	return index
-}
-
-// TestTheStream: for the same phases, the generator writes the stream (and keeps the records)
-// recorded in testdata/stream.json. A change here is a change of the task's requests.
+// TestTheStream: for the same phases, the generator writes the stream recorded in
+// testdata/stream.json. A change here is a change of the task's requests.
 func TestTheStream(t *testing.T) {
 	path := os.Getenv(dataset.PathEnv)
 	if path == "" {
@@ -162,11 +121,10 @@ func TestTheStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var history []*pb.HistoryEntry
 	for n := range want.Phases {
 		phase := &want.Phases[n]
-		if *update && n > 0 {
-			if err := rewriteHistory(filepath.Join("testdata", phase.PhaseInput), history); err != nil {
+		if *update {
+			if err := clearHistory(filepath.Join("testdata", phase.PhaseInput)); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -201,41 +159,6 @@ func TestTheStream(t *testing.T) {
 			}
 			if got := sum(frames[1:]); got != phase.StreamSHA256 {
 				t.Errorf("the stream of %d operations has digest %s, want %s", phase.Operations, got, phase.StreamSHA256)
-			}
-			keptFile, err := os.Open(filepath.Join(state, "kept.binpb"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer func() { _ = keptFile.Close() }()
-			keptIn := bufio.NewReader(keptFile)
-			var kept [][]byte
-			for {
-				f, err := frame(keptIn)
-				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-					break
-				}
-				if err != nil {
-					t.Fatal(err)
-				}
-				if keptIndex(f) >= uint64(phase.Operations) { // records are in stream order
-					break
-				}
-				kept = append(kept, f)
-			}
-			if *update {
-				phase.KeptSHA256 = sum(kept)
-				if n == 0 {
-					var header pb.RequestsHeader
-					if err := proto.Unmarshal(frames[1], &header); err != nil {
-						t.Fatal(err)
-					}
-					if history, err = historyOf(header.GetOperationNames(), kept); err != nil {
-						t.Fatal(err)
-					}
-				}
-			}
-			if got := sum(kept); got != phase.KeptSHA256 {
-				t.Errorf("the %d kept records have digest %s, want %s", len(kept), got, phase.KeptSHA256)
 			}
 		})
 	}

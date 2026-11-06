@@ -1,12 +1,18 @@
 [[objective]]
 name = "operations_per_second"
 direction = "max"
-relative_noise = 0.05   # placeholder from hotel-k8s; set from the base measure
+# Base on vibesys-evaluator 0.3.0rc2, vibesys-k8s (a shared host), 6 samples of fresh seeds,
+# closed loop 2 x 20 s: 2941, 3047, 3182, 3216, 3222, 3384 ops/s; mean 3165, CV 4.9%.
+relative_noise = 0.05
 
 [[objective]]
 name = "latency_ms.p99"
 direction = "min"
-relative_noise = 0.10   # placeholder from hotel-k8s; set from the base measure
+# Same samples, open loop 3 x 60 s at 70% of the sample's own throughput: 4.3, 4.5, 4.5, 5.0,
+# 8.6, 193 ms. Four are quiet (CV 6.3%); in the other two, two of the three trials met
+# host-wide stalls of 5-12 s that delayed every request. The floor is the quiet spread; the
+# runs' own spread carries the stalls.
+relative_noise = 0.10
 
 [pareto]
 relative_noise = 0.10

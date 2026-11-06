@@ -19,7 +19,7 @@ Requests go to nginx-thrift's public HTTP API (`/wrk2-api/...` and `/api/...`):
 
 - 50% user-timeline reads (a user's own posts, newest first),
 - 40% home-timeline reads (posts of the users one follows, newest first),
-- 10% compose-post, each followed by reads that check the new post is visible
+- 10% compose-post, each followed by a read of the author's user timeline
   (read-your-write),
 - about 1% follow / unfollow.
 
@@ -90,8 +90,10 @@ rewrite the data (it may add indexes of its own).
 
 ## Correctness bar
 
-The check deploys the candidate, seeds the dataset and runs the task's checker over the
-public API only; it restarts single pods and flushes caches while it checks. With
+The accuracy check deploys the candidate, seeds the dataset and sends the task's accuracy
+workload over the public API only, at a fixed modest rate, with every answer recorded; between
+its phases it restarts pods of every service (one at a time, then all of a Deployment at once)
+and flushes the caches. The task's oracle then judges the whole history. With
 "acknowledged" meaning the request returned HTTP 200 and the bound B = 1 s:
 
 1. Exact data. Every post served has the stored content: post id, creator, request id,
@@ -115,8 +117,10 @@ public API only; it restarts single pods and flushes caches while it checks. Wit
    `home-timeline-redis` is a store, not a cache, and is never flushed.
 
 Requests in flight, or acknowledged less than B before the read, may or may not be
-visible. Timestamp ties may be served in either order. The load generator validates the
-benchmark's responses against the same model, and a wrong answer fails the measurement.
+visible. Timestamp ties may be served in either order. Lost answers and 5xx answers are
+unknown outcomes; more than 1% of them fails the check. The benchmark does not judge
+answers (an answer other than HTTP 200 is an error that invalidates its measurement); the
+accuracy check does.
 
 ## Rules
 

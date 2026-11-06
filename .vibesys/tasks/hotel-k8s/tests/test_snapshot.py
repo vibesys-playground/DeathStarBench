@@ -76,10 +76,10 @@ class DataImageTest(unittest.TestCase):
         stage = re.search(r"^FROM (\S+) AS data$", dockerfile, re.M)
         self.assertIsNotNone(stage, "the Dockerfile has no data stage")
         self.assertEqual(stage.group(1), image)
-        self.assertIn("COPY --from=oracle /out/hotel-data /usr/local/bin/", dockerfile)
+        self.assertIn("COPY --from=evaluator /out/hotel-data /usr/local/bin/", dockerfile)
         # The task image (the last stage) runs hotel-data verify in the seed.
         last = dockerfile[dockerfile.rindex("\nFROM "):]
-        self.assertRegex(last, r"COPY --from=oracle [^\n]*/out/hotel-data")
+        self.assertRegex(last, r"COPY --from=evaluator [^\n]*/out/hotel-data")
 
     def test_the_tag_follows_the_files_it_is_built_from(self):
         with tempfile.TemporaryDirectory() as directory:

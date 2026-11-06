@@ -1,17 +1,18 @@
 # social-network-k8s evaluator
 
-The task's Go module: dataset, seeding, the oracle, the benchmark's request
-generator and the accuracy checker for DeathStarBench Social Network.
-`INTERFACE.md` is the contract with bench.py and run.py.
+The task's Go module: dataset, seeding, the benchmark's request generator, and
+the accuracy check's workload and oracle for DeathStarBench Social Network.
+`INTERFACE.md` is the contract with bench.py.
 
 | Path | What |
 | --- | --- |
 | `internal/dataset` | the dataset, generated from a seed (digest pinned by a test) |
 | `internal/seed`, `cmd/seed` | writes it into MongoDB and Redis as the services would (schemas in `internal/seed/documents.go`) |
 | `internal/timeline` | wire format and the page-window check |
-| `internal/oracle` | the contract as a state machine: `Step(state, call)`, bounded-staleness reads, the verifier of programs (calls, parallel groups, restarts, flushes), the check programs C1-C14 and their HTTP system |
-| `internal/snworkload`, `cmd/generator` | the benchmark's workload on the vibesys-evaluator Go SDK (built as `sn-generator`): request distributions, and checks by the oracle |
-| `cmd/checker` | the accuracy check: runs the oracle's check programs against a deployment |
+| `internal/snapi` | the public API as the workloads and the oracle see it: an `Action` (what one call sends), its HTTP request, and an HTTP client (tests) |
+| `internal/snworkload`, `cmd/generator` | the benchmark's workload on the vibesys-evaluator Go SDK (built as `sn-generator`): request distributions only |
+| `internal/snaccuracy`, `cmd/accuracy-generator` | the accuracy check's workload (built as `sn-accuracy-generator`): one action per operation, its Info the action |
+| `internal/snspec`, `cmd/oracle` | the contract as two `check.Spec`s (per author, per reader) on vibesys-evaluator's checker, and `check.Main` over a captured history directory (built as `sn-oracle`; see the task README, Accuracy oracle) |
 | `internal/fakeapp` | in-process fake of the public API with injectable faults (tests) |
 
 ## Dataset
@@ -39,9 +40,9 @@ not know the dataset's content. Writing the documents directly takes about
 
 ## Testing
 
-`go.mod` requires the vibesys-evaluator Go SDK at the release the Dockerfile's
-`VIBESYS_EVALUATOR_VERSION` names (change both together), so `go test ./...` works anywhere with network access. The phase and stream
-tests of `cmd/generator` build loadgen from that module (or use `$LOADGEN`); `-short` skips
-the phase tests. The stream test pins the generator's request stream for two
-phases (`cmd/generator/testdata`); `SN_STREAM_RECORD=1` re-records it, which is
-a change of the task's requests.
+`go.mod` requires the vibesys-evaluator Go module at the release the Dockerfile's
+`VIBESYS_EVALUATOR_VERSION` names (change both together; `tests/test_accuracy.py` checks they agree), so
+`go test ./...` works anywhere with network access. The stream test pins the generator's request stream for two phases
+(`cmd/generator/testdata`); `SN_STREAM_RECORD=1` re-records it, which is a change of the task's
+requests. `internal/snspec` and `internal/snaccuracy` run the in-process fake application
+(`-short` skips those runs).

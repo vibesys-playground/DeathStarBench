@@ -1,20 +1,23 @@
-"""hotel-k8s benchmark: DeathStarBench Hotel Reservation on Kubernetes, on vibesys-evaluator.
+"""hotel-k8s benchmark and accuracy check: DeathStarBench Hotel Reservation on Kubernetes, on vibesys-evaluator.
 
     python /task/bench.py benchmark --project-root ROOT --vs-output PATH   (one sample)
+    python /task/bench.py accuracy --project-root ROOT                     (exit 0 PASS, 1 FAIL, 2 UNKNOWN)
 
 The five parts: (1) the system under test, (2) the initial data (seed),
-(3) the workload, (4) the benchmark function, (5) the validity rules. The
-data is dataset.py's. The workload (operations, request distributions, the
-model the writes change and the checks of the responses) is the Go generator
-of evaluator/cmd/generator, which shares its model with the accuracy oracle;
-this script orchestrates: it validates the candidate's application tier
-against the capacity envelope, makes sure the node holds the data snapshot
-(snapshot.py), deploys, runs the phases and reports.
+(3) the workload, (4) the benchmark function, (5) the validity rules; and
+(6) the accuracy check. The data is dataset.py's. The workloads (operations
+and request distributions) are the Go generators of evaluator/cmd; this
+script orchestrates: it validates the candidate's application tier against
+the capacity envelope, makes sure the node holds the data snapshot
+(snapshot.py), deploys, runs the phases and reports. A benchmark only
+measures: whether the answers are right is the accuracy check's, which
+deploys the same system.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import os
 import statistics
 import subprocess
@@ -92,15 +95,19 @@ SYSTEM = k8s.App(
         get("/recommendations", query={"require": "rate", **PROBE_LOCATION}),
         get("/hotels", query={"inDate": "2300-01-01", "outDate": "2300-01-02", **PROBE_LOCATION}),
     ],
+    # The cache tiers (task-owned, k8s/manifest.yaml), which the accuracy check's faults empty.
+    caches={cache: "memcached" for cache in ("memcached-profile", "memcached-rate", "memcached-reserve")},
+    # Each MongoDB pod copies the node's snapshot (49 GB in all) into its emptyDir before mongod
+    # starts: the six copies at once outlasted the default 300 s in 3 of 9 deploys here.
+    wait_secs=1800,
 )
 
 
 # ------------------------------------------------------------ (3) workload
-# The operations, their weights, how each request is drawn, the model the writes change and
-# the checks are Go: evaluator/internal/hotelworkload on the vibesys-evaluator Go SDK, over
-# the accuracy oracle's own model (the dataset file, hotel.Reference, hotel.State). The task
-# image builds it as hotel-generator (evaluator/cmd/generator); each phase pod runs it under
-# loadgen to generate the request stream, then to check the phase's responses.
+# The operations, their weights and how each request is drawn are Go:
+# evaluator/internal/hotelworkload on the vibesys-evaluator Go SDK, over the dataset file and the
+# pinned application's reference answers (hotelref.Reference). The task image builds it as
+# hotel-generator (evaluator/cmd/generator); each phase pod runs it under loadgen.
 
 WORKLOAD = Generator(["hotel-generator"])  # on the task image's PATH
 
@@ -138,6 +145,14 @@ def benchmark(run: ms.Run) -> None:
 
 # ------------------------------------------------------------- (5) validity
 
+METRICS = {
+    "operations_per_second": vse.Metric(unit="ops/s", direction="max"),
+    "latency_ms.p99": vse.Metric(unit="ms", direction="min"),
+}
+# No error in any window, every operation of the mix completed, and the open loop offers at
+# least 95% of its rate.
+VALIDITY = vse.Validity(max_error_rate=0.0, min_sustained_ratio=0.95, min_ops_per_operation=1)
+
 _PREPARE_ERROR: list[Exception] = []
 
 # How long a sample waits for the data snapshot: a first build takes about 25 minutes; past
@@ -145,16 +160,22 @@ _PREPARE_ERROR: list[Exception] = []
 SNAPSHOT_WAIT_SECONDS = 2700
 
 
-def prepare(argv: list[str], target: Path, *, ensure=snapshot.ensure, environ=os.environ) -> envelope.App | None:
-    """For `benchmark`: validate the candidate's application tier, make sure the node holds
-    the data snapshot, and write the deployed manifest (restoring that snapshot).
+# The commands that deploy the system: the benchmark and the accuracy check.
+DEPLOYING = ("benchmark", "accuracy")
 
-    A failure is kept and raised by `dataset()`, the first thing a sample calls inside
-    its error handling and before it builds or deploys anything, so that the sample fails
-    with the validator's (or the snapshot's) message in its records. The envelope is checked
-    first: a candidate outside it fails before the snapshot is looked at.
+
+def prepare(argv: list[str], target: Path, *, ensure=snapshot.ensure, environ=os.environ) -> envelope.App | None:
+    """For `benchmark` and `accuracy`: validate the candidate's application tier,
+    make sure the node holds the data snapshot, and write the deployed manifest (restoring that
+    snapshot).
+
+    A failure is kept (`prepare_error()`) and raised by `dataset()`, the first thing a sample
+    calls inside its error handling and before it builds or deploys anything, so that the sample
+    fails with the validator's (or the snapshot's) message in its records. The envelope is
+    checked first: a candidate outside it fails before the snapshot is looked at. Returns the
+    candidate's tier, or None for another command or a failure.
     """
-    if argv[:1] != ["benchmark"]:
+    if not argv or argv[0] not in DEPLOYING:
         return None
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--project-root", type=Path, required=True)
@@ -184,24 +205,102 @@ def prepare(argv: list[str], target: Path, *, ensure=snapshot.ensure, environ=os
     return app
 
 
+def prepare_error() -> Exception | None:
+    """What made `prepare` fail, if it did."""
+    return _PREPARE_ERROR[0] if _PREPARE_ERROR else None
+
+
 def dataset() -> ds.Spec:
     if _PREPARE_ERROR:
         raise _PREPARE_ERROR[0]
     return ds.generate()
 
 
-if __name__ == "__main__":
-    prepare(sys.argv[1:], Path(__file__).resolve().parent / DEPLOYED)
+# ------------------------------------------------------- (6) accuracy check
+# vibesys-evaluator's accuracy run (its docs/spec.md, "Accuracy run") over the system above: the
+# candidate's application tier within the capacity envelope, the task's data tier restored from
+# the node's data snapshot, the seed's check of what MongoDB holds. It runs ACCURACY_PHASES
+# open-loop phases of the accuracy workload (evaluator/internal/hotelaccuracy, built as
+# hotel-accuracy-generator) at a fixed ACCURACY_RATE with every answer captured, applies the
+# faults below between them, tears the system down and runs the oracle (evaluator/cmd/oracle,
+# built as hotel-oracle: internal/hotelspec on vibesys-evaluator's checker) on the history. The
+# report, the failures' timelines and the history go to /vibesys/artifacts/accuracy.
+#
+# The load: a fixed, modest rate (the base serves about 390 operations/s of the benchmark's
+# mix in a closed loop; at 200/s its p99 is about 4 ms), so that the answers are judged, not the
+# capacity: the base lost no answer and had at most 3 operations of one hotel in flight at once
+# (the report's MaxInFlight). Four phases of 30 s: about 26,000 operations, most of them on the
+# ten hot hotels.
+ACCURACY_PHASES, ACCURACY_RATE, ACCURACY_SECS, ACCURACY_WARMUP = 4, 200, 30, 2
+
+ACCURACY_WORKLOAD = Generator(["hotel-accuracy-generator"])  # on the task image's PATH
+ORACLE = ["hotel-oracle"]
+
+
+def faults(app: envelope.App) -> list[ms.Fault]:
+    """The fault schedule over the candidate's Deployments and the task's caches.
+
+    The faults are what the oracle's model says changes nothing (hotelspec's Spec.Fault is nil:
+    an acknowledged reservation, capacity, profile or price lives in MongoDB, and the caches are
+    rebuilt from it), so a candidate that keeps an acknowledged write only in a pod or in
+    memcached fails:
+
+    - after phase 0, one pod of each of the candidate's Deployments, one after the other, each
+      waited for until the application serves again (the others serve meanwhile);
+    - after phase 1, the three memcached tiers emptied in place (`flush_all`);
+    - after phase 2, every pod of each of the candidate's Deployments at once, one Deployment
+      after the other.
+
+    MongoDB is never restarted: its pods restore the snapshot into an emptyDir, so a new pod
+    would lose the sample's writes by the task's design, not the candidate's.
+    """
+    return (
+        [ms.Fault.restart(name, after=0) for name in app.names]
+        + [ms.Fault.flush(cache, after=1) for cache in SYSTEM.caches]
+        + [ms.Fault.restart_all(name, after=2) for name in app.names]
+    )
+
+
+def check(app: envelope.App | None) -> ms.Accuracy:
+    """The accuracy check of the candidate's tier.
+
+    Its workload is constant (the phase pods build it again); the faults name the candidate's
+    Deployments, which only the `accuracy` command (the orchestrator) knows and applies.
+    """
+    return ms.Accuracy(
+        phases=ACCURACY_PHASES, rate=ACCURACY_RATE, secs=ACCURACY_SECS, warmup=ACCURACY_WARMUP,
+        workload=ACCURACY_WORKLOAD,
+        faults=faults(app) if app is not None else [],
+        oracle=ORACLE,
+    )
+
+
+def system(app: envelope.App | None) -> k8s.App:
+    """SYSTEM, with the candidate's Deployments open to the accuracy check's restarts."""
+    return SYSTEM if app is None else dataclasses.replace(SYSTEM, restartable=tuple(app.names))
+
+
+def main(argv: list[str]) -> None:
+    app = prepare(argv, Path(__file__).resolve().parent / DEPLOYED)
+    error = prepare_error()
+    # A benchmark sample fails with the error in its records (dataset() raises it); the
+    # accuracy check's verdict is FAIL for a candidate outside the envelope, else UNKNOWN.
+    if argv[:1] == ["accuracy"] and error is not None:
+        if isinstance(error, envelope.EnvelopeError):
+            sys.stderr.write(f"FAIL: the candidate's application tier is outside the capacity envelope: {error}\n")
+            sys.exit(1)
+        sys.stderr.write(f"UNKNOWN: the accuracy run did not complete: {error}\n")
+        sys.exit(2)
     ms.main(
         dataset=dataset,
-        system=SYSTEM,
+        system=system(app),
         workload=WORKLOAD,
         benchmark=benchmark,
-        metrics={
-            "operations_per_second": vse.Metric(unit="ops/s", direction="max"),
-            "latency_ms.p99": vse.Metric(unit="ms", direction="min"),
-        },
-        # No error and no failed check in any window, every operation of the mix
-        # completed, and the open loop offers at least 95% of its rate.
-        validity=vse.Validity(max_error_rate=0.0, min_sustained_ratio=0.95, min_ops_per_operation=1),
+        metrics=METRICS,
+        validity=VALIDITY,
+        accuracy=check(app),
     )
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

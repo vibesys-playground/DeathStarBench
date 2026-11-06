@@ -1,7 +1,7 @@
 // Command seed writes the task's generated Social Network dataset directly
-// into the application's data tier (see internal/seed for the schemas). run.py
-// runs it as a Kubernetes Job in the namespace once the data-tier pods are
-// Ready and before any request reaches the application.
+// into the application's data tier (see internal/seed for the schemas).
+// vibesys-evaluator's seed Job runs it (bench.py's seed) in the namespace once
+// the data-tier pods are Ready and before any request reaches the application.
 //
 //	seed [--dataset-seed N] [--address NAME=HOST:PORT ...] [--timeout 10m]
 //	seed --summary-only  # print the summary, write nothing
