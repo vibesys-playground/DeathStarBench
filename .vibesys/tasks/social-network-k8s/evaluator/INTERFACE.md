@@ -6,8 +6,8 @@ owned by the evaluator; any change to it is announced in the commit that makes
 it.
 
 Go module `vibesys/social-network-k8s-evaluator`. `go.mod` requires the
-vibesys-evaluator Go SDK at the pseudo-version of the vibesys commit the Dockerfile's
-`EVALUATOR_REF` names (the same commit as the loadgen binary the task image holds).
+vibesys-evaluator Go SDK at the release the Dockerfile's
+`EVALUATOR_GO_VERSION` names (the same as the loadgen binary the task image holds).
 
 Build (in the Dockerfile, `CGO_ENABLED=0`):
 

@@ -3,7 +3,7 @@ module vibesys/hotel-k8s-evaluator
 go 1.25.0
 
 require (
-	github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen v0.1.0-rc.2.0.20261106013004-5b13578e0d29
+	github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen v0.2.0-rc.1
 	go.mongodb.org/mongo-driver v1.16.0
 	google.golang.org/protobuf v1.36.12
 	vibesys/microservice-evaluator v0.0.0

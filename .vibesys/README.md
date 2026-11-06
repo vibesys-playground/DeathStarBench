@@ -11,8 +11,8 @@ vibesys --task social-network-k8s
 Both tasks use task schema 0.2 (`version = "0.2"`) without a `[candidate]` section: one task
 image runs the check and the benchmark, and the task's own code deploys the application to
 Kubernetes (this needs a vibesys CLI that accepts a 0.2 manifest without `[candidate]`). Each
-task image installs vibesys-evaluator from the public uw-syfi/vibesys repository at the commit
-its Dockerfile's `EVALUATOR_REF` names.
+task image installs vibesys-evaluator release 0.2.0rc1 (PyPI and the public uw-syfi/vibesys
+module tags), pinned in its Dockerfile.
 
 Task definitions are authored input. VibeSys owns
 generated run data under `state/`; local-only data under `state/local/` is
