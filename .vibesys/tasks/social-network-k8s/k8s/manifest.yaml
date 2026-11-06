@@ -1,5 +1,5 @@
 # Task-owned deployment of DeathStarBench Social Network for social-network-k8s.
-# run.py and bench.py (through vibesys-evaluator) substitute ${NAMESPACE} and
+# bench.py and accuracy.py (through vibesys-evaluator) substitute ${NAMESPACE} and
 # ${SOCIAL_NETWORK_IMAGE} (the candidate image built from socialNetwork/) and apply
 # the data tier (tier: data) before the application (tier: app). Replica counts, resources and the data tier are the
 # task's; the code, nginx.conf, Lua scripts and service-config.json come from

@@ -5,9 +5,9 @@
 The five parts: (1) the system under test, (2) the initial data (seed),
 (3) the workload, (4) the benchmark function, (5) the validity rules. The
 data is dataset.py's seed of the Go dataset (evaluator/internal/dataset). The
-workload (operations, request distributions, the model the writes change and
-the checks of the responses) is the Go generator of evaluator/cmd/generator,
-whose checks are the accuracy check's oracle (evaluator/internal/oracle).
+workload (operations and request distributions) is the Go generator of
+evaluator/cmd/generator. A benchmark only measures: whether the answers are
+right is the accuracy check's (accuracy.py, on the same system).
 """
 
 from __future__ import annotations
@@ -97,11 +97,10 @@ SYSTEM = k8s.App(
 
 # ------------------------------------------------------------ (3) workload
 # The operations (50% user-timeline reads, 40% home-timeline reads, 10% compose with a
-# read-your-write read, 1% follow and unfollow), how each request is drawn, the model the
-# writes change and the checks are Go: evaluator/internal/snworkload on the vibesys-evaluator
-# Go SDK, over the accuracy check's oracle (evaluator/internal/oracle). The task image builds
-# it as sn-generator (evaluator/cmd/generator); each phase pod runs it under loadgen to
-# generate the request stream, then to check the phase's responses.
+# read-your-write read, 1% follow and unfollow) and how each request is drawn are Go:
+# evaluator/internal/snworkload on the vibesys-evaluator Go SDK. The task image builds it as
+# sn-generator (evaluator/cmd/generator); each phase pod runs it under loadgen to generate the
+# request stream. Nothing checks the answers here (accuracy.py does, with its own workload).
 
 WORKLOAD = Generator(["sn-generator"])  # on the task image's PATH
 
@@ -143,7 +142,7 @@ METRICS = {
     "operations_per_second": vse.Metric(unit="ops/s", direction="max"),
     "latency_ms.p99": vse.Metric(unit="ms", direction="min"),
 }
-# No error and no failed check in any window, every operation of the mix completed,
+# No error in any window (an answer other than 200 is one), every operation of the mix completed,
 # and the open loop offers at least 95% of its rate.
 VALIDITY = vse.Validity(max_error_rate=0.0, min_sustained_ratio=0.95, min_ops_per_operation=1)
 

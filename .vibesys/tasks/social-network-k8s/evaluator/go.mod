@@ -3,10 +3,7 @@ module vibesys/social-network-k8s-evaluator
 go 1.25.0
 
 require (
-	// The oracle's checker (cmd/oracle): a pseudo-version of vibesys main (cdb35bd1f, PR 3961), unreleased;
-	// the release tag replaces it. Its protobuf files clash with loadgen's: no binary links both.
-	github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go v0.0.0-20261106083534-cdb35bd1f4f6
-	github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen v0.2.0-rc.1
+	github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go v0.3.0-rc.1
 	go.mongodb.org/mongo-driver v1.12.2
 	google.golang.org/protobuf v1.36.12
 )

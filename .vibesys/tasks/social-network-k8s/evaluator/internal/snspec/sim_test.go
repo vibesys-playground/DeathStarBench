@@ -1,5 +1,5 @@
 // simulate drives the task's fakeapp (in-process Social Network fake with injectable
-// faults) with concurrent clients over HTTP and records oracle.Calls plus fault events.
+// faults) with concurrent clients over HTTP and records snapi.Calls plus fault events.
 package snspec
 
 import (
@@ -20,7 +20,7 @@ import (
 
 	"vibesys/social-network-k8s-evaluator/internal/dataset"
 	"vibesys/social-network-k8s-evaluator/internal/fakeapp"
-	"vibesys/social-network-k8s-evaluator/internal/oracle"
+	"vibesys/social-network-k8s-evaluator/internal/snapi"
 )
 
 // Mangle post-processes read responses (injected bugs the fake has no option for).
@@ -65,7 +65,7 @@ func runSim(p Params) simOut {
 	if ct == 0 {
 		ct = 10 * time.Second
 	}
-	sys := oracle.NewHTTPSystem(srv.URL, ct, &http.Transport{MaxIdleConnsPerHost: 64}, nil)
+	sys := snapi.NewHTTPSystem(srv.URL, ct, &http.Transport{MaxIdleConnsPerHost: 64})
 	rng := rand.New(rand.NewSource(p.Seed))
 	// hot users: dataset users that have posts
 	var hot []int64
@@ -78,7 +78,7 @@ func runSim(p Params) simOut {
 	out := simOut{Data: data}
 	var mu sync.Mutex
 	nextIndex := make([]uint64, p.Phases)
-	record := func(ph int, c oracle.Call) {
+	record := func(ph int, c snapi.Call) {
 		mu.Lock()
 		out.Calls[ph] = append(out.Calls[ph], FromOracleCall(c, ph, nextIndex[ph]))
 		nextIndex[ph]++
@@ -94,7 +94,7 @@ func runSim(p Params) simOut {
 			if v == u {
 				continue
 			}
-			record(0, sys.Invoke(ctx, oracle.Follow(u, v, true)))
+			record(0, sys.Invoke(ctx, snapi.Follow(u, v, true)))
 		}
 	}
 	prefix := fmt.Sprintf("m%08x", p.Seed&0xffffffff)
@@ -108,26 +108,26 @@ func runSim(p Params) simOut {
 				for i := 0; i < p.Ops; i++ {
 					u := hot[r.Intn(len(hot))]
 					page := []int{0, 0, 0, 10, 20}[r.Intn(5)]
-					var a oracle.Action
+					var a snapi.Action
 					x := r.Intn(100)
 					switch {
 					case p.InvalidEvery > 0 && i%p.InvalidEvery == p.InvalidEvery-1:
 						switch r.Intn(5) {
 						case 0:
-							a = oracle.RawRead(true, "abc", "0", "10")
+							a = snapi.RawRead(true, "abc", "0", "10")
 						case 1:
-							a = oracle.RawRead(false, strconv.FormatInt(u, 10), "5", "5")
+							a = snapi.RawRead(false, strconv.FormatInt(u, 10), "5", "5")
 						case 2:
-							a = oracle.RawRead(true, strconv.FormatInt(u, 10), "-1", "10")
+							a = snapi.RawRead(true, strconv.FormatInt(u, 10), "-1", "10")
 						case 3:
-							a = oracle.RawRead(true, "999999999", "0", "10")
+							a = snapi.RawRead(true, "999999999", "0", "10")
 						default:
-							a = oracle.Action{Kind: oracle.KindCompose, User: u, Name: "user" + strconv.FormatInt(u, 10), Text: ""}
+							a = snapi.Action{Kind: snapi.KindCompose, User: u, Name: "user" + strconv.FormatInt(u, 10), Text: ""}
 						}
 					case x < 22:
 						mk := prefix + strconv.FormatInt(markerSeq.Add(1), 36)
 						text := "w" + strconv.Itoa(r.Intn(100)) + " x" + strconv.Itoa(r.Intn(100))
-						a = oracle.Action{Kind: oracle.KindCompose, User: u, Name: "user" + strconv.FormatInt(u, 10), Marker: mk}
+						a = snapi.Action{Kind: snapi.KindCompose, User: u, Name: "user" + strconv.FormatInt(u, 10), Marker: mk}
 						if r.Intn(5) == 0 {
 							v := hot[r.Intn(len(hot))]
 							if v != u {
@@ -146,17 +146,17 @@ func runSim(p Params) simOut {
 						if v == u {
 							v = hot[(r.Intn(len(hot)-1)+1+indexOf(hot, u))%len(hot)]
 						}
-						a = oracle.Follow(u, v, r.Intn(3) != 0)
+						a = snapi.Follow(u, v, r.Intn(3) != 0)
 					case x < 60:
-						a = oracle.Read(false, u, page, page+10)
+						a = snapi.Read(false, u, page, page+10)
 					default:
-						a = oracle.Read(true, u, page, page+10)
+						a = snapi.Read(true, u, page, page+10)
 					}
 					call := sys.Invoke(ctx, a)
 					record(ph, call)
-					if a.Kind == oracle.KindCompose && a.Text != "" && call.Status == 200 && p.Think > 0 {
+					if a.Kind == snapi.KindCompose && a.Text != "" && call.Status == 200 && p.Think > 0 {
 						// read your write, as the benchmark does
-						rd := oracle.Read(false, u, 0, 10)
+						rd := snapi.Read(false, u, 0, 10)
 						rd.Holds = []string{a.Marker}
 						record(ph, sys.Invoke(ctx, rd))
 					}
@@ -304,8 +304,8 @@ func TestSynthetic(t *testing.T) {
 			out := runSim(p)
 			h := check.NewHistory(out.Calls, out.Faults)
 			o := opts()
-			a := check.Check(h, []check.AnySpec{AuthorSpec(out.Data, p.Bound, oracle.DefaultSlack)}, o)
-			r := check.Check(h, []check.AnySpec{ReaderSpec(out.Data, p.Bound, oracle.DefaultSlack)}, o)
+			a := check.Check(h, []check.AnySpec{AuthorSpec(out.Data, p.Bound, Slack)}, o)
+			r := check.Check(h, []check.AnySpec{ReaderSpec(out.Data, p.Bound, Slack)}, o)
 			got := both(a, r)
 			t.Logf("author %s (%v), reader %s (%v)", a.Verdict, a.Elapsed.Round(time.Millisecond), r.Verdict, r.Elapsed.Round(time.Millisecond))
 			if got != sc.want {

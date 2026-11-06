@@ -10,7 +10,7 @@ import (
 	"github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go/check"
 
 	"vibesys/social-network-k8s-evaluator/internal/dataset"
-	"vibesys/social-network-k8s-evaluator/internal/oracle"
+	"vibesys/social-network-k8s-evaluator/internal/snapi"
 )
 
 // Handcrafted histories, no dataset: users register first. Times in ms from t0.
@@ -18,22 +18,22 @@ var t0 = time.Unix(1_800_000_000, 0)
 
 func at(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 
-type hb struct{ calls []oracle.Call }
+type hb struct{ calls []snapi.Call }
 
 func (h *hb) reg(id int64, ms int) {
 	n := "u" + strconv.FormatInt(id, 10)
-	h.calls = append(h.calls, oracle.Call{Action: oracle.Register(id, n), Start: at(ms), End: at(ms + 1), Status: 200, Body: []byte("Success!")})
+	h.calls = append(h.calls, snapi.Call{Action: snapi.Register(id, n), Start: at(ms), End: at(ms + 1), Status: 200, Body: []byte("Success!")})
 }
 func (h *hb) compose(u int64, marker string, s, e int, mentions ...int64) {
-	a := oracle.Action{Kind: oracle.KindCompose, User: u, Name: "u" + strconv.FormatInt(u, 10), Marker: marker, Text: "hello #" + marker, Mentions: mentions}
-	h.calls = append(h.calls, oracle.Call{Action: a, Start: at(s), End: at(e), Status: 200, Body: []byte("Successfully upload post")})
+	a := snapi.Action{Kind: snapi.KindCompose, User: u, Name: "u" + strconv.FormatInt(u, 10), Marker: marker, Text: "hello #" + marker, Mentions: mentions}
+	h.calls = append(h.calls, snapi.Call{Action: a, Start: at(s), End: at(e), Status: 200, Body: []byte("Successfully upload post")})
 }
 func (h *hb) composeErr(u int64, marker string, s, e int) {
-	a := oracle.Action{Kind: oracle.KindCompose, User: u, Name: "u" + strconv.FormatInt(u, 10), Marker: marker, Text: "hello #" + marker}
-	h.calls = append(h.calls, oracle.Call{Action: a, Start: at(s), End: at(e), Err: "timeout"})
+	a := snapi.Action{Kind: snapi.KindCompose, User: u, Name: "u" + strconv.FormatInt(u, 10), Marker: marker, Text: "hello #" + marker}
+	h.calls = append(h.calls, snapi.Call{Action: a, Start: at(s), End: at(e), Err: "timeout"})
 }
 func (h *hb) follow(u, v int64, on bool, s, e int) {
-	h.calls = append(h.calls, oracle.Call{Action: oracle.Follow(u, v, on), Start: at(s), End: at(e), Status: 200, Body: []byte("Success!")})
+	h.calls = append(h.calls, snapi.Call{Action: snapi.Follow(u, v, on), Start: at(s), End: at(e), Status: 200, Body: []byte("Success!")})
 }
 
 type shown struct {
@@ -65,11 +65,11 @@ func (h *hb) read(home bool, u int64, s, e int, posts ...shown) {
 	} else {
 		body, _ = json.Marshal(arr)
 	}
-	h.calls = append(h.calls, oracle.Call{Action: oracle.Read(home, u, 0, 10), Start: at(s), End: at(e), Status: 200, Body: body})
+	h.calls = append(h.calls, snapi.Call{Action: snapi.Read(home, u, 0, 10), Start: at(s), End: at(e), Status: 200, Body: body})
 }
 
 func (h *hb) raw(home bool, uid, st, sp string, status int, body string, s int) {
-	h.calls = append(h.calls, oracle.Call{Action: oracle.RawRead(home, uid, st, sp), Start: at(s), End: at(s + 1), Status: status, Body: []byte(body)})
+	h.calls = append(h.calls, snapi.Call{Action: snapi.RawRead(home, uid, st, sp), Start: at(s), End: at(s + 1), Status: status, Body: []byte(body)})
 }
 
 // options: the unit histories lose responses on purpose.
@@ -79,8 +79,8 @@ func opts() check.Options {
 
 // phased splits calls into phases at the faults (a call belongs to the phase of the faults that
 // started before it) and converts them to the history's form.
-func phased(calls []oracle.Call, faults []check.Fault) [][]check.Call {
-	calls = append([]oracle.Call(nil), calls...)
+func phased(calls []snapi.Call, faults []check.Fault) [][]check.Call {
+	calls = append([]snapi.Call(nil), calls...)
 	sort.SliceStable(calls, func(i, j int) bool { return calls[i].Start.Before(calls[j].Start) })
 	phases := make([][]check.Call, len(faults)+1)
 	next := make([]uint64, len(faults)+1)
@@ -100,7 +100,7 @@ func phased(calls []oracle.Call, faults []check.Fault) [][]check.Call {
 
 // checkBoth checks calls with both specs (the nil dataset: only registered users and live
 // posts) and returns the two reports.
-func checkBoth(d *dataset.Dataset, calls []oracle.Call, faults []check.Fault, o check.Options) (author, reader *check.Report) {
+func checkBoth(d *dataset.Dataset, calls []snapi.Call, faults []check.Fault, o check.Options) (author, reader *check.Report) {
 	h := check.NewHistory(phased(calls, faults), faults)
 	author = check.Check(h, []check.AnySpec{DefaultAuthorSpec(d)}, o)
 	reader = check.Check(h, []check.AnySpec{DefaultReaderSpec(d)}, o)

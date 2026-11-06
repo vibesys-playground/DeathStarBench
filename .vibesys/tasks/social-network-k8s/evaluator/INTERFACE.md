@@ -1,25 +1,28 @@
-# social-network-k8s evaluator: interface for bench.py and run.py
+# social-network-k8s evaluator: interface for bench.py and accuracy.py
 
 This file is the contract between the evaluator module (this directory) and
-the task's trusted code (`bench.py`, `run.py`, the Dockerfile and the manifest). It is
-owned by the evaluator; any change to it is announced in the commit that makes
-it.
+the task's trusted code (`bench.py`, `accuracy.py`, the Dockerfile and the
+manifest). It is owned by the evaluator; any change to it is announced in the
+commit that makes it.
 
 Go module `vibesys/social-network-k8s-evaluator`. `go.mod` requires the
-vibesys-evaluator Go SDK at the release the Dockerfile's
-`VIBESYS_EVALUATOR_VERSION` names (the same as the loadgen binary the task image holds).
+vibesys-evaluator Go module (`github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go`:
+the workload SDK and the checker) at the release the Dockerfile's
+`VIBESYS_EVALUATOR_VERSION` names (the same as the Python package and the
+loadgen the task image holds).
 
 Build (in the Dockerfile, `CGO_ENABLED=0`):
 
-    go build -o /out/sn-generator ./cmd/generator
-    go build -o /out/seed         ./cmd/seed
-    go build -o /out/checker      ./cmd/checker
+    go build -o /out/seed                  ./cmd/seed
+    go build -o /out/sn-generator          ./cmd/generator
+    go build -o /out/sn-accuracy-generator ./cmd/accuracy-generator
+    go build -o /out/sn-oracle             ./cmd/oracle
 
-All three are static binaries without runtime files; the dataset is generated
-in-process from the dataset seed. They are on the task image's `PATH`:
-bench.py's seed runs `seed`, its phase pods run `sn-generator`, and `checker`
-runs where `run.py check` runs (it only needs the nginx URL and the restart
-hook); run.py's own seed Job runs `seed` from a busybox image.
+All four are static binaries without runtime files; the dataset is generated
+in-process from the dataset seed. They are on the task image's `PATH`: the
+seed Job runs `seed`, the benchmark's phase pods run `sn-generator`, the
+accuracy run's phase pods `sn-accuracy-generator`, and the accuracy run runs
+`sn-oracle` on the captured history where `accuracy.py` runs.
 
 ## Application topology the evaluator assumes
 
@@ -75,68 +78,41 @@ digest) is left alone and the command succeeds; anything else is an error
 
 ## `sn-generator`: the benchmark's workload
 
-`workload.Main` of the vibesys-evaluator Go SDK (`generate` and `check`, the
-SDK's generator command line), with the operations `user_timeline_read`
-(weight 500), `home_timeline_read` (400), `compose_post` (100: compose, then
-read the author's user timeline [0, 10), read your write), `follow` (5) and
-`unfollow` (5); a follow or unfollow holds its edge's exclusive key, so two
-changes of one edge never overlap. `--dataset` is the file bench.py's
-`dataset()` writes, `{"seed": N, "digest": "<sha256>"}`: the generator builds
-the dataset of that seed and refuses one of another digest.
+`workload.Main` of the vibesys-evaluator Go SDK (`generate`, the SDK's
+generator command line), with the operations `user_timeline_read` (weight
+500), `home_timeline_read` (400), `compose_post` (100: compose, then read the
+author's user timeline [0, 10), read your write), `follow` (5) and `unfollow`
+(5). `--dataset` is the file bench.py's `dataset()` writes,
+`{"seed": N, "digest": "<sha256>"}`: the generator builds the dataset of that
+seed and refuses one of another digest. It only measures: nothing checks the
+answers (an answer other than 200 is an error of the window).
 
-`check` judges the phase's responses with the oracle (`internal/oracle`): the
-sample's earlier writes (the phase's history) and this phase's writes are
-applied first (a write whose answer is lost or failed may have taken effect at
-any later time), then each checked call in start order. Every write is
-checked, and the SDK's default share (10%) of the reads.
+## `sn-accuracy-generator`: the accuracy check's workload
 
-## `checker`: the accuracy check
+`workload.Main` over `internal/snaccuracy`. Every operation is one
+`snapi.Action`: its Info is the action's JSON and its one step the action's
+HTTP request (`snapi.Request`). The traffic concentrates on 40 hot users (the
+36 most active and the 4 most followed): `compose` (18), `follow` (5),
+`unfollow` (3), `home_read` (30) and `user_read` (20) of hot users,
+`home_read_any` and `user_read_any` (10 each: the benchmark's draws over the
+whole dataset), `register` (1: ids from 1,500,000,000 + phase << 20),
+`read_registered` (1) and `invalid` (2: a non-numeric user, an empty or a
+negative window, an unknown user, a compose without text). Markers and
+registered users are unique per phase.
 
-    checker --base-url URL --seed N|random --restart-command-json '["...", ...]'
-            [--deployments a,b,...] [--caches a,b,...] [--dataset-seed N]
-            [--skip-dataset] [--freshness-ms 1000] [--replica-reads 12]
-            [--skip-follow-after-flush]
+## `sn-oracle`: the accuracy check's oracle
 
-Exit 0: every check passed; 1: a check failed (a failing restart hook fails
-the durability check); 2: usage or setup error (the app is unreachable). One line per check on
-stdout (`PASS name` / `FAIL name: detail`), then one JSON summary line.
+    sn-oracle --history DIR [--out DIR] [budget flags]
 
-Each check is a program of the oracle (`internal/oracle/checks.go`: calls,
-parallel groups of calls, restarts, flushes and waits for the bound), and it
-passes when some ordering of its calls that respects their real-time order is
-a run of the oracle's model that admits every answer; a failure names the
-first step no ordering explains.
+`check.Main` of the vibesys-evaluator checker over two specs of
+`internal/snspec`, whose verdicts are ANDed: per author (`u:<id>`: its
+composes, registration, the follows that point at it, its user timeline and
+every home read projected to the authors on its page; `n:<name>` for username
+claims) and per reader (`r:<id>`: page arithmetic across authors). Exit 0
+PASS, 1 FAIL, 2 UNKNOWN. `Spec.Fault` is nil in both: restarts and cache
+flushes change nothing in the contract below.
 
-The checker creates its own users (ids from 3,000,000,000 and names derived
-from the seed, far from the dataset's 1..20000), never follows or mentions dataset users, and reads the
-dataset only, so it can run before or after a benchmark phase; with the
-dataset check (the default) it must run on a freshly seeded deployment that no
-benchmark has written to (`--skip-dataset` otherwise).
-
-Restart hook: the checker runs the JSON argv with two extra arguments and
-waits for it to exit 0:
-
-    ARGV... restart DEPLOYMENT   delete one running pod of DEPLOYMENT; return
-                                 once the deployment has all replicas Ready
-                                 again and nginx answers
-    ARGV... flush SERVICE        empty the cache SERVICE (Redis FLUSHALL,
-                                 memcached flush_all); return when done
-
-`--deployments` defaults to the stateless deployments above, `--caches` to
-`post-storage-memcached,user-memcached,url-shorten-memcached,media-memcached,user-timeline-redis,social-graph-redis`.
-`home-timeline-redis` is the only store of home timelines in the pinned app,
-so it is not a cache and is never flushed.
-
-After each flush the checker first has a new user follow an existing user,
-before anything reads the flushed state, then composes as the followee. The
-pinned social-graph service fails this after a `social-graph-redis` flush:
-`Follow` ZADDs into `<id>:followers` whether or not the set is cached, and
-`GetFollowers` treats any non-empty cached set as complete, so the older
-followers stop receiving posts. Fix in the base (e.g. update the cached sets
-only if they exist, or delete them on follow/unfollow), or run with
-`--skip-follow-after-flush` until then.
-
-## The contract the oracle enforces (in the checker and the benchmark's checks)
+## The contract the oracle enforces
 
 For OBJECTIVE.md; "acknowledged" means the request returned HTTP 200, the
 bound B is 1 s.
@@ -158,7 +134,12 @@ bound B is 1 s.
    comply).
 5. Every replica: 2-4 hold whichever instance serves the read.
 6. Durability: acknowledged data survives a restart of any stateless pod and a
-   flush of any cache listed above.
+   flush of any cache tier (memcached, `social-graph-redis`,
+   `user-timeline-redis`). `home-timeline-redis` is the only store of home
+   timelines in the pinned app, so it is not a cache and is never flushed.
+7. Registration: registering a free username is acknowledged; a taken one
+   never is.
 
 Requests in flight, or acknowledged less than B before the read, may or may
-not be visible. Timestamp ties may be served in either order.
+not be visible. Timestamp ties may be served in either order. At the check's
+fixed rate, more than 1% of unknown outcomes (lost answers and 5xx) fails.

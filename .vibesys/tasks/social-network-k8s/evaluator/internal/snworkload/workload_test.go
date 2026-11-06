@@ -1,16 +1,12 @@
 package snworkload
 
 import (
-	"encoding/json"
 	"strconv"
-	"strings"
 	"testing"
-	"time"
 
-	"github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen/workload"
+	"github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go/workload"
 
 	"vibesys/social-network-k8s-evaluator/internal/dataset"
-	"vibesys/social-network-k8s-evaluator/internal/timeline"
 )
 
 func newModel(t *testing.T) *Model {
@@ -31,19 +27,6 @@ func operation(name string) workload.Operation[*Model] {
 	panic(name)
 }
 
-func infoOf(t *testing.T, request workload.Request) json.RawMessage {
-	t.Helper()
-	raw, err := json.Marshal(request.Info)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return raw
-}
-
-var t0 = time.Unix(2_000_000_000, 0)
-
-func at(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
-
 // TestRequestDistribution measures, over 100k operations of the mix, how often a timeline
 // request repeats one already made (the hit rate of an unbounded cache keyed by the exact
 // request); the earlier adapter's was 66.7% (user timelines 77%, home timelines 57%).
@@ -61,24 +44,20 @@ func TestRequestDistribution(t *testing.T) {
 	pages := map[int]int{}
 	for i := 0; i < 100000; i++ {
 		op := ops[stream.Weighted(weights)]
-		request := op.Build(m, stream.Child(i))
-		info := infoOf(t, request)
+		// The draws of the operation's Build: its word decides the user and the page.
+		word := stream.Child(i).Uint64()
+		op.Build(m, stream.Child(i))
 		var key string
 		switch op.Name {
 		case opUserTimeline, opHomeTimeline:
-			var r readInfo
-			_ = json.Unmarshal(info, &r)
-			key = op.Name + strconv.Itoa(int(r.User)) + "/" + strconv.Itoa(r.Start)
-			pages[r.Start/pageSize]++
-		case opCompose:
-			var c composeInfo
-			_ = json.Unmarshal(info, &c)
-			key = opUserTimeline + strconv.Itoa(int(c.Author)) + "/0"
-		}
-		if op.Apply != nil {
-			if err := op.Apply(m, workload.Call{Info: info, Pending: true}); err != nil {
-				t.Fatal(err)
+			user := m.popularUser(word, streamUser)
+			if op.Name == opHomeTimeline {
+				user = m.activeUser(word, streamUser)
 			}
+			key = op.Name + strconv.Itoa(int(user)) + "/" + strconv.Itoa(Page(word))
+			pages[Page(word)/pageSize]++
+		case opCompose:
+			key = opUserTimeline + strconv.Itoa(int(m.activeUser(word, streamUser))) + "/0"
 		}
 		if key == "" {
 			continue
@@ -103,123 +82,53 @@ func TestRequestDistribution(t *testing.T) {
 	}
 }
 
-// TestComposeIsCheckedByTheOracle: a compose's Apply records the post and its Check requires
-// it in the author's timeline read right after (read your write).
-func TestComposeIsCheckedByTheOracle(t *testing.T) {
-	m := newModel(t)
-	op := operation(opCompose)
-	request := op.Build(m, workload.NewRand(3, "phase", 0).Child(0))
-	info := infoOf(t, request)
-	if err := op.Apply(m, workload.Call{Info: info, Pending: true}); err != nil {
-		t.Fatal(err)
-	}
-	if m.nextSeq != 1 || m.State().Posts() != 1 {
-		t.Fatalf("pending apply: seq %d, posts %d", m.nextSeq, m.State().Posts())
-	}
-	// The check phase: a fresh model with the write's outcome.
-	m = newModel(t)
-	a, _, err := m.composeOf(workload.Call{Info: info})
-	if err != nil {
-		t.Fatal(err)
-	}
-	author := m.data.UserIndex(a.User)
-	served := timeline.Post{PostID: "99000001", CreatorID: strconv.FormatInt(a.User, 10), Creator: a.Name, ReqID: "5",
-		Text: a.Text, Timestamp: at(5).UnixMilli(), Media: a.Media}
-	for _, v := range a.Mentions {
-		served.Mentions = append(served.Mentions, timeline.Mention{UserID: strconv.FormatInt(v, 10), Username: m.data.Users[v-1].Username})
-	}
-	if a.URL != "" {
-		served.URLs = []timeline.URL{{Shortened: "http://short-url/abc", Expanded: a.URL}}
-		served.Text = strings.TrimSuffix(a.Text, a.URL) + "http://short-url/abc"
-	}
-	page := []timeline.Post{served}
-	for _, p := range m.data.UserPosts.Row(author) {
-		if len(page) == pageSize {
-			break
+// A phase's markers are its own: no two phases of a sample post the same one.
+func TestMarkersArePerPhase(t *testing.T) {
+	seen := map[string]bool{}
+	for phase := range 3 {
+		m := newModel(t)
+		if err := BeginPhase(m, phase); err != nil {
+			t.Fatal(err)
 		}
-		page = append(page, timeline.Seeded(m.data, p))
-	}
-	call := workload.Call{Info: info, Start: at(0), End: at(10), OK: true, Responses: []workload.Response{
-		{Status: 200, Body: []byte("Successfully upload post")}, {Status: 200, Body: encode(page)},
-	}}
-	if err := op.Apply(m, call); err != nil {
-		t.Fatal(err)
-	}
-	if err := op.Check(m, call); err != nil {
-		t.Fatalf("a correct compose: %v", err)
-	}
-	m = newModel(t)
-	if err := op.Apply(m, call); err != nil {
-		t.Fatal(err)
-	}
-	stale := call
-	stale.Responses = []workload.Response{call.Responses[0], {Status: 200, Body: encode(page[1:])}}
-	if err := op.Check(m, stale); err == nil || !strings.Contains(err.Error(), "read your write") {
-		t.Fatalf("a compose missing from the read after it: %v", err)
-	}
-	refused := call
-	refused.Responses = []workload.Response{{Status: 500, Body: []byte("error")}, call.Responses[1]}
-	if err := op.Check(m, refused); err == nil {
-		t.Fatal("a refused compose passed")
+		for i := range 100 {
+			seq := m.nextSeq
+			operation(opCompose).Build(m, workload.NewRand(3, "phase", uint64(phase)).Child(i))
+			marker := m.compose(0, 1, seq).Marker
+			if seen[marker] || m.nextSeq != seq+1 {
+				t.Fatalf("phase %d: marker %s again (next %d)", phase, marker, m.nextSeq)
+			}
+			seen[marker] = true
+		}
 	}
 }
 
-// TestEdgesBuildOnPendingWrites: an unfollow is drawn among the edges the pending follows and
-// unfollows left, and holds the edge's exclusive key.
-func TestEdgesBuildOnPendingWrites(t *testing.T) {
+// Follow changes build on the seeded graph and this phase's earlier changes: a follow is of an
+// edge that is off, an unfollow of one that is on.
+func TestEdgesBuildOnThePhasesChanges(t *testing.T) {
 	m := newModel(t)
 	follow, unfollow := operation(opFollow), operation(opUnfollow)
 	stream := workload.NewRand(5, "phase", 0)
 	for i := 0; i < 2000; i++ {
-		op := follow
+		op, on := follow, true
 		if i%2 == 1 {
-			op = unfollow
+			op, on = unfollow, false
 		}
-		request := op.Build(m, stream.Child(i))
-		var e edgeInfo
-		if err := json.Unmarshal(infoOf(t, request), &e); err != nil {
-			t.Fatal(err)
+		before := map[[2]int32]bool{}
+		for e, v := range m.changed {
+			before[e] = v
 		}
-		if m.follows(e.U, e.V) == e.On {
-			t.Fatalf("operation %d changes edge %d -> %d to its current state %v", i, e.U, e.V, e.On)
+		op.Build(m, stream.Child(i))
+		var edge [2]int32
+		for e, v := range m.changed {
+			if was, ok := before[e]; !ok || was != v {
+				edge = e
+			}
 		}
-		if request.Exclusive != "edge:"+strconv.Itoa(int(e.U))+":"+strconv.Itoa(int(e.V)) {
-			t.Fatalf("exclusive key %q", request.Exclusive)
+		if !m.follows(edge[0], edge[1]) == on || m.changed[edge] != on {
+			t.Fatalf("operation %d: edge %v is %v after a change to %v", i, edge, m.follows(edge[0], edge[1]), on)
 		}
-		if err := op.Apply(m, workload.Call{Info: infoOf(t, request), Pending: true}); err != nil {
-			t.Fatal(err)
-		}
-		if m.follows(e.U, e.V) != e.On {
-			t.Fatal("the pending change is not the latest state")
+		if was, ok := before[edge]; ok && was == on || !ok && m.data.Follows(int(edge[0]), int(edge[1])) == on {
+			t.Fatalf("operation %d changes edge %v to its current state %v", i, edge, on)
 		}
 	}
-}
-
-func encode(posts []timeline.Post) []byte {
-	list := make([]map[string]any, len(posts))
-	for i, p := range posts {
-		empty := func(n int, item func(int) any) any {
-			if n == 0 {
-				return map[string]any{}
-			}
-			out := make([]any, n)
-			for j := range out {
-				out[j] = item(j)
-			}
-			return out
-		}
-		list[i] = map[string]any{
-			"post_id": p.PostID, "req_id": p.ReqID, "text": p.Text, "timestamp": strconv.FormatInt(p.Timestamp, 10), "post_type": 0,
-			"creator": map[string]any{"user_id": p.CreatorID, "username": p.Creator},
-			"user_mentions": empty(len(p.Mentions), func(j int) any {
-				return map[string]any{"user_id": p.Mentions[j].UserID, "username": p.Mentions[j].Username}
-			}),
-			"media": empty(len(p.Media), func(j int) any { return map[string]any{"media_id": p.Media[j].ID, "media_type": p.Media[j].Type} }),
-			"urls": empty(len(p.URLs), func(j int) any {
-				return map[string]any{"shortened_url": p.URLs[j].Shortened, "expanded_url": p.URLs[j].Expanded}
-			}),
-		}
-	}
-	encoded, _ := json.Marshal(list)
-	return encoded
 }

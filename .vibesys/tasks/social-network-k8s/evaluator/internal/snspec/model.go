@@ -1,5 +1,5 @@
 // Package snspec is the Social Network accuracy oracle on vibesys-evaluator's `check` package:
-// the contract of OBJECTIVE.md and internal/oracle (time-window visibility with the bound B,
+// the contract of OBJECTIVE.md and internal/snapi (time-window visibility with the bound B,
 // edge uncertainty, mentions that deliver regardless of edges, live post identity learned at first
 // sight, page windows) as two check.Specs over the same history, whose verdicts are ANDed:
 //
@@ -281,7 +281,7 @@ func (m *Model) edgeAt(s State, u, v int64, seededFollow bool, t int64) (on, cer
 	return m.edgeAtC(s.Edges[u], seededFollow, t)
 }
 
-// edgeAtC: the state of one edge at t from its changes (see oracle.edgeAt).
+// edgeAtC: the state of one edge at t from its changes (the earlier state-machine oracle's edgeAt).
 func (m *Model) edgeAtC(changes []Change, seededFollow bool, t int64) (on, certain bool) {
 	var prior []Change
 	for _, c := range changes {

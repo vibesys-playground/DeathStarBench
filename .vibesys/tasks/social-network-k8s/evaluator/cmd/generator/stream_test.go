@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -15,8 +14,37 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	pb "github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen/gen/vibesys/evaluator/v1"
+	pb "github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go/gen/vibesys/evaluator/v1"
+
+	"vibesys/social-network-k8s-evaluator/internal/dataset"
+	"vibesys/social-network-k8s-evaluator/internal/snworkload"
 )
+
+// mainEnv makes the test binary the generator (TestMain runs main), so the test runs the
+// generator command as the phase pod does: a process whose stream is closed when it has enough.
+const mainEnv = "SN_GENERATOR_TEST_MAIN"
+
+func TestMain(m *testing.M) {
+	if os.Getenv(mainEnv) == "1" {
+		main()
+		return
+	}
+	os.Exit(m.Run())
+}
+
+// datasetFile writes the dataset file bench.py's dataset() writes.
+func datasetFile(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, "dataset.json")
+	encoded, err := json.Marshal(snworkload.DatasetFile{Seed: dataset.DefaultSeed, Digest: dataset.Default().Digest()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, encoded, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
 
 // recordEnv rewrites testdata/ from the current generator instead of checking it.
 const recordEnv = "SN_STREAM_RECORD"
@@ -28,7 +56,6 @@ type golden struct {
 		PhaseInput   string `json:"phase_input"`
 		Operations   int    `json:"operations"`
 		StreamSHA256 string `json:"stream_sha256"`
-		KeptSHA256   string `json:"kept_sha256"`
 	} `json:"phases"`
 }
 
@@ -56,16 +83,14 @@ func sum(frames [][]byte) string {
 }
 
 // generateStream runs `generate` as loadgen does and reads n operations; it returns the frames
-// after the FileHeader (the RequestsHeader, then the operations) and the kept records of those
-// operations.
-func generateStream(t *testing.T, phaseInput string, n int) (stream, kept [][]byte) {
+// after the FileHeader (the RequestsHeader, then the operations).
+func generateStream(t *testing.T, phaseInput string, n int) [][]byte {
 	t.Helper()
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	state := t.TempDir()
-	command := exec.Command(self, "generate", "--phase-input", phaseInput, "--dataset", datasetFile(t, t.TempDir()), "--state", state)
+	command := exec.Command(self, "generate", "--phase-input", phaseInput, "--dataset", datasetFile(t, t.TempDir()), "--state", t.TempDir())
 	command.Env = append(os.Environ(), mainEnv+"=1")
 	command.Stderr = os.Stderr
 	stdout, err := command.StdoutPipe()
@@ -88,36 +113,13 @@ func generateStream(t *testing.T, phaseInput string, n int) (stream, kept [][]by
 	if err := command.Wait(); err != nil {
 		t.Fatalf("generate: %v", err)
 	}
-	file, err := os.Open(filepath.Join(state, "kept.binpb"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = file.Close() }()
-	keptIn := bufio.NewReader(file)
-	for {
-		f, err := frame(keptIn)
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			break
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		record := &pb.KeptOperation{}
-		if err := proto.Unmarshal(f, record); err != nil {
-			t.Fatal(err)
-		}
-		if record.GetIndex() >= uint64(n) { // records are in stream order
-			break
-		}
-		kept = append(kept, f)
-	}
-	return frames[1:], kept
+	return frames[1:]
 }
 
-// TestTheStreamIsPinned: for the same phases, the generator writes the stream (and keeps the
-// records) recorded in testdata/. The requests of each operation were the earlier
-// servicebench adapter's, word for word (internal/snworkload's TestRequestsAreTheEarlierAdapters
-// at the commit that recorded them); a change here is a change of the task's requests.
+// TestTheStreamIsPinned: for the same phases, the generator writes the stream recorded in
+// testdata/. The requests of each operation are the earlier servicebench adapter's, word for
+// word (internal/snworkload's TestRequestsAreTheEarlierAdapters at the commit that first
+// recorded them); a change here is a change of the task's requests.
 func TestTheStreamIsPinned(t *testing.T) {
 	if os.Getenv(recordEnv) == "1" {
 		record(t)
@@ -132,12 +134,9 @@ func TestTheStreamIsPinned(t *testing.T) {
 	}
 	for _, phase := range want.Phases {
 		t.Run(phase.PhaseInput, func(t *testing.T) {
-			stream, kept := generateStream(t, filepath.Join("testdata", phase.PhaseInput), phase.Operations)
+			stream := generateStream(t, filepath.Join("testdata", phase.PhaseInput), phase.Operations)
 			if got := sum(stream); got != phase.StreamSHA256 {
 				t.Errorf("the stream of %d operations has digest %s, want %s", phase.Operations, got, phase.StreamSHA256)
-			}
-			if got := sum(kept); got != phase.KeptSHA256 {
-				t.Errorf("the %d kept records have digest %s, want %s", len(kept), got, phase.KeptSHA256)
 			}
 			// The mix: 500/400/100/5/5.
 			header := &pb.RequestsHeader{}
@@ -162,13 +161,11 @@ func TestTheStreamIsPinned(t *testing.T) {
 	}
 }
 
-// record writes testdata/: a closed phase, then an open one whose history is the writes of
-// the closed phase's first 5,000 operations, acknowledged.
+// record writes testdata/: a closed phase 0 and an open phase 1 of the same sample.
 func record(t *testing.T) {
 	t.Helper()
-	closed := &pb.PhaseInput{SampleSeed: 48, PhaseIndex: 0, Model: pb.LoadModel_LOAD_MODEL_CLOSED, Clients: 32, Secs: 20, WarmupSecs: 10}
 	write := func(name string, input *pb.PhaseInput) string {
-		encoded, err := proto.Marshal(input)
+		encoded, err := proto.MarshalOptions{Deterministic: true}.Marshal(input)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -181,45 +178,17 @@ func record(t *testing.T) {
 	if err := os.MkdirAll("testdata", 0o755); err != nil {
 		t.Fatal(err)
 	}
-	out := golden{About: "the generator's stream for these phases: SHA-256 over its frames (4-byte little-endian length, then the frame) after the FileHeader: the RequestsHeader and the first operations; and over its kept records of those operations. Recorded by TestTheStreamIsPinned with " + recordEnv + "=1."}
-	add := func(name string, input *pb.PhaseInput, n int) [][]byte {
-		stream, kept := generateStream(t, write(name, input), n)
+	out := golden{About: "the generator's stream for these phases: SHA-256 over its frames (4-byte little-endian length, then the frame) after the FileHeader: the RequestsHeader and the first operations. Re-recorded by TestTheStreamIsPinned with " + recordEnv + "=1 when benchmarks stopped checking (no kept records or history; per-phase compose markers; follow edges from the phase's own changes)."}
+	add := func(name string, input *pb.PhaseInput, n int) {
 		out.Phases = append(out.Phases, struct {
 			PhaseInput   string `json:"phase_input"`
 			Operations   int    `json:"operations"`
 			StreamSHA256 string `json:"stream_sha256"`
-			KeptSHA256   string `json:"kept_sha256"`
-		}{name, n, sum(stream), sum(kept)})
-		return kept
+		}{name, n, sum(generateStream(t, write(name, input), n))})
 	}
-	kept := add("phase0.binpb", closed, 30000)
-	names := []string{"user_timeline_read", "home_timeline_read", "compose_post", "follow", "unfollow"}
-	var history []*pb.HistoryEntry
-	for i, f := range kept {
-		record := &pb.KeptOperation{}
-		if err := proto.Unmarshal(f, record); err != nil {
-			t.Fatal(err)
-		}
-		name := names[record.GetOperation()]
-		if record.GetIndex() >= 5000 {
-			break
-		}
-		if name != "compose_post" && name != "follow" && name != "unfollow" {
-			continue
-		}
-		start := int64(1_800_000_000_000_000_000) + int64(i)*1_000_000
-		answer := func(body string) *pb.StepResult {
-			return &pb.StepResult{Status: 200, Response: &pb.StepResult_Body{Body: []byte(body)}}
-		}
-		steps := []*pb.StepResult{answer("Success")}
-		if name == "compose_post" {
-			steps = []*pb.StepResult{answer("Successfully upload post"), answer("{}")}
-		}
-		history = append(history, &pb.HistoryEntry{Operation: name, InfoJson: record.GetInfoJson(),
-			StartUnixNanos: start, EndUnixNanos: start + 500_000, Ok: true, Steps: steps})
-	}
+	add("phase0.binpb", &pb.PhaseInput{SampleSeed: 48, PhaseIndex: 0, Model: pb.LoadModel_LOAD_MODEL_CLOSED, Clients: 32, Secs: 20, WarmupSecs: 10}, 30000)
 	add("phase1.binpb", &pb.PhaseInput{SampleSeed: 48, PhaseIndex: 1, Model: pb.LoadModel_LOAD_MODEL_OPEN, Rate: 1500,
-		Arrivals: pb.Arrivals_ARRIVALS_UNIFORM, Secs: 60, WarmupSecs: 10, History: history}, 60000)
+		Arrivals: pb.Arrivals_ARRIVALS_UNIFORM, Secs: 60, WarmupSecs: 10}, 60000)
 	encoded, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		t.Fatal(err)
@@ -227,5 +196,4 @@ func record(t *testing.T) {
 	if err := os.WriteFile(filepath.Join("testdata", "stream.json"), append(encoded, '\n'), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("recorded testdata/ (%d history entries in phase 1)", len(history))
 }

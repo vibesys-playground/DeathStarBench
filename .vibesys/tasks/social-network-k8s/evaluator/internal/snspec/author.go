@@ -10,7 +10,7 @@ import (
 	"github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go/check"
 
 	"vibesys/social-network-k8s-evaluator/internal/dataset"
-	"vibesys/social-network-k8s-evaluator/internal/oracle"
+	"vibesys/social-network-k8s-evaluator/internal/snapi"
 	"vibesys/social-network-k8s-evaluator/internal/timeline"
 )
 
@@ -21,6 +21,10 @@ const Bound = time.Second
 // EffectWindow is how long after its call an unknown outcome may still take effect: loadgen's
 // default step timeout.
 const EffectWindow = 10 * time.Second
+
+// Slack bounds the difference between the application's clock and the client's when a live
+// post's timestamp is checked against the time it was composed.
+const Slack = 5 * time.Second
 
 type (
 	piece      = check.Piece[any, any]
@@ -50,7 +54,7 @@ func AuthorSpec(d *dataset.Dataset, bound, slack time.Duration) *check.Spec[Stat
 
 // DefaultAuthorSpec and DefaultReaderSpec use the task's bound and slack.
 func DefaultAuthorSpec(d *dataset.Dataset) *check.Spec[State, any, any] {
-	return AuthorSpec(d, Bound, oracle.DefaultSlack)
+	return AuthorSpec(d, Bound, Slack)
 }
 
 func (m *Model) seededUserByName(name string) int {
@@ -65,10 +69,10 @@ func (m *Model) seededUserByName(name string) int {
 }
 
 // projectAuthor is the per-author spec's Project. Whatever needs the whole history (who is
-// known, who follows whom, who mentions whom) is resolved first by collect, then the pieces are
-// added.
+// known, who follows whom, who mentions whom) is collected in a first pass over the phases; the
+// pieces are added in a second.
 func (m *Model) projectAuthor(phases iter.Seq[[]check.Call], out *projection) error {
-	h, err := collect(phases)
+	h, err := m.collect(phases)
 	if err != nil {
 		return err
 	}
@@ -83,39 +87,35 @@ func (m *Model) projectAuthor(phases iter.Seq[[]check.Call], out *projection) er
 		return ""
 	}
 	knownEver := func(id int64) bool { return h.known[id] || m.seededUser(id) >= 0 }
-	for i := range h.calls {
-		ac := &h.calls[i]
+	return calls(phases, func(ac *acall) {
 		a := ac.a
 		add := func(key string, in, o any, write bool) {
 			out.Add(piece{Keys: []string{key}, In: in, Out: o, Write: write, Unknown: ac.unknown, Origin: ac.origin})
 		}
 		wo := WriteOut{Status: ac.status, Acked: ac.acked}
 		switch a.Kind {
-		case oracle.KindRegister:
+		case snapi.KindRegister:
 			add(ukey(a.User), Register{ID: a.User}, wo, true)
 			add("n:"+a.Name, Claim{Name: a.Name, Taken: m.seededUserByName(a.Name) >= 0}, wo, true)
-		case oracle.KindCompose:
+		case snapi.KindCompose:
 			cp := Compose{Author: a.User, AuthorName: nameOf(a.User), Marker: a.Marker, Text: a.Text, URL: a.URL, Mentions: a.Mentions, Media: a.Media, Empty: a.Text == ""}
 			for _, v := range a.Mentions {
 				cp.MentionNames = append(cp.MentionNames, nameOf(v))
 			}
 			add(ukey(a.User), cp, wo, true)
-		case oracle.KindFollow:
+		case snapi.KindFollow:
 			add(ukey(a.Followee), Follow{U: a.User, V: a.Followee, On: a.On}, wo, true)
-		case oracle.KindRead:
+		case snapi.KindRead:
 			m.projectRead(out, ac, knownEver, h)
 		}
-	}
-	return nil
+	})
 }
 
-func (m *Model) projectRead(out *projection, ac *acall, knownEver func(int64) bool, h *history) {
+func (m *Model) projectRead(out *projection, ac *acall, knownEver func(int64) bool, h *facts) {
 	a := ac.a
 	d := m.Data
 	user, errU := strconv.ParseInt(a.UserID, 10, 64)
-	start, errS := strconv.Atoi(a.Start)
-	stop, errE := strconv.Atoi(a.Stop)
-	valid := errU == nil && errS == nil && errE == nil && start >= 0 && start < stop
+	_, start, stop, valid := pageWindow(a)
 	key := "x:" + a.UserID
 	if errU == nil {
 		key = ukey(user)

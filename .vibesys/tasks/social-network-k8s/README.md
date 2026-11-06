@@ -7,12 +7,12 @@ candidate input: the CLI versions these files as the task.
 | Path | What |
 | --- | --- |
 | `vibesys.input.toml`, `objectives.toml` | Manifest and the two Pareto objectives. |
-| `Dockerfile` | The task image every job (and the benchmark's pods) runs in: vibesys-evaluator (the Python package from PyPI, `loadgen` and `otelcapture` by `go install` of the public uw-syfi/vibesys module tag, release 0.2.0rc1; the Dockerfile's `VIBESYS_EVALUATOR_VERSION` sets it; the evaluator's own image is private), kubectl 1.34 and buildctl, and `sn-generator`, `checker` and `seed` built from `evaluator/` against the Go SDK `evaluator/go.mod` requires at the same release. Base images are pinned by digest. |
+| `Dockerfile` | The task image every job (and the pods of a benchmark sample or an accuracy check) runs in: vibesys-evaluator (the Python package from PyPI, whose platform wheel bundles the core, `loadgen` and `otelcapture`, the latter two linked onto PATH for the probe pods; release 0.3.0rc1, the Dockerfile's `VIBESYS_EVALUATOR_VERSION` sets it), kubectl 1.34 and buildctl, and `seed`, `sn-generator`, `sn-accuracy-generator` and `sn-oracle` built from `evaluator/` against the vibesys-evaluator Go module `evaluator/go.mod` requires at the same release. Base images are pinned by digest. |
 | `bench.py`, `dataset.py` | The benchmark on vibesys-evaluator: the system (`k8s.App`), the seed, the workload (`sn-generator`), the phases and the validity rules; the dataset is the Go dataset's seed and digest. |
-| `run.py` | The accuracy check: `check`, `sweep`, and `ctl` (the checker's restart and flush hook). |
+| `accuracy.py` | The accuracy check on vibesys-evaluator's accuracy run: bench.py's system, the accuracy workload (`sn-accuracy-generator`), the fault schedule and the oracle (`sn-oracle`). |
 | `k8s/manifest.yaml` | The application: 24 Deployments, 24 Services, 1 ConfigMap (tracing). Flat, namespaced kinds only. |
-| `evaluator/` | Owned by the evaluator: dataset, seed, the oracle, the generator and the checker (`cmd/oracle`, `internal/snspec`: the oracle on the vibesys-evaluator checker, see Accuracy oracle); `evaluator/INTERFACE.md` is the contract with `bench.py` and `run.py`. |
-| `tests/` | Unit tests of `bench.py`, `dataset.py` and `run.py` (`python -m unittest discover -s tests`, with vibesys-evaluator installed). |
+| `evaluator/` | Owned by the evaluator: dataset, seed, the benchmark's workload (`internal/snworkload`), the accuracy workload (`internal/snaccuracy`) and the oracle (`cmd/oracle`, `internal/snspec`); `evaluator/INTERFACE.md` is the contract with `bench.py` and `accuracy.py`. |
+| `tests/` | Unit tests of `bench.py`, `dataset.py` and `accuracy.py` (`python -m unittest discover -s tests`, with vibesys-evaluator installed). |
 
 ## The benchmark (`bench.py benchmark`)
 
@@ -20,52 +20,50 @@ vibesys-evaluator builds `socialNetwork/` (image variable `SOCIAL_NETWORK_IMAGE`
 `k8s/manifest.yaml` into a fresh namespace, applies the data tier (`tier=data`) first, runs the
 seed Job (`bench.py seed`, which runs the Go `seed`: the dataset and its indexes), then the
 application, and waits until `/` and a user- and a home-timeline read of user 1999999999 answer
-200. Each phase runs in a pod: `loadgen` with `sn-generator generate` under it, then
-`sn-generator check`, which checks every write and a 10% sample of the reads against the oracle
-(`evaluator/internal/oracle`); the writes of a phase are the next phase's history.
+200. Each phase runs in a pod: `loadgen` with `sn-generator generate` under it. A benchmark only
+measures: nothing checks the answers (the accuracy check does), and an answer other than 200 is an
+error of its window. Every phase builds its model afresh: its compose markers are its own, and a
+follow or unfollow is drawn from the seeded graph and the phase's own changes.
 
 Phases: two closed-loop trials (32 clients, 10 s warmup, 20 s), `operations_per_second` their
 median; three open-loop trials (evenly spaced arrivals, 10 s warmup, 60 s) offered 70% of that,
-`latency_ms.p99` their median. Validity: no error and no failed check, every operation of the
-mix completed, the open loop sustains 95% of its rate.
+`latency_ms.p99` their median. Validity: no error, every operation of the mix completed, the open
+loop sustains 95% of its rate.
 
-## The check (`run.py check`)
+## The accuracy check (`accuracy.py accuracy`)
 
-1. Builds `socialNetwork/` with `buildctl` against `$VIBESYS_K8S_BUILDER` and pushes
-   `$VIBESYS_K8S_REGISTRY/social-network-k8s/social-network:<tree hash>`; builds and pushes the
-   seed image (busybox + `seed`).
-2. Creates namespace `hk8s-sn-<random>` and applies `k8s/manifest.yaml` with `${NAMESPACE}` and
-   `${SOCIAL_NETWORK_IMAGE}` substituted, in two parts: first the configuration, every Service
-   and the data tier (`tier: data`: MongoDB, Redis, memcached, jaeger). Once the data tier is
-   Available it runs the Job `seed`, which writes the task's dataset and its indexes directly
-   into the data tier (`seed.log`, `seed.summary.json` in the artifacts). Only then it applies
-   the twelve application Deployments (`tier: app`) and waits for every Deployment to be
-   Available.
-3. Starts a local forwarder: one supervised `kubectl port-forward` per nginx-thrift pod and a
-   local listener that hands each new connection to the next pod, so a client with several
-   connections reaches both replicas (a forward to `service/nginx-thrift` would pick one pod).
-   Waits until `/` and a user- and a home-timeline read answer 200, twice over each forward.
-4. Runs `checker` against the forwarder with `--restart-command-json` pointing at
-   `run.py ctl`, which restarts one pod of a stateless Deployment (`restart NAME`: delete it,
-   wait for the rollout, all Deployments Available and the API ready) or flushes a cache tier
-   (`flush NAME`: memcached `flush_all`, Redis `FLUSHALL`; `home-timeline-redis` is a store and
-   is refused). Exit 0 is a pass; `pods.txt` records the pods and their restarts.
-5. Deletes the namespace on every exit path the process can see: normal end, error, SIGTERM,
-   SIGINT and SIGHUP. The CLI ends a cancelled or timed-out job with SIGKILL, which leaks the
-   namespace. Each namespace therefore carries labels `vibesys.dev/social-network-k8s=1`,
-   `vibesys.dev/social-network-k8s-created=<epoch>` and `vibesys.dev/social-network-k8s-job=<job
-   id>`, and every check first deletes the task's `hk8s-sn-*` namespaces older than the larger of
-   the manifest's `timeout_seconds` plus 10 minutes. The label keys are this task's own, and
-   vibesys-evaluator sweeps the benchmark's namespaces by its own label, so no sweep touches
-   another's namespaces. `run.py sweep` runs only the sweep.
+vibesys-evaluator's accuracy run over bench.py's system: it builds and deploys the candidate as a
+benchmark sample does (data tier, seed, application, readiness probes), then runs four open-loop
+phases of `sn-accuracy-generator` (300 operations/s, 2 s warmup, 30 s; about 36,000 operations)
+with every answer captured, applies the faults between them, tears the namespace down and runs
+`sn-oracle --history DIR` on the captured history. Exit 0 PASS, 1 FAIL, 2 UNKNOWN (also when the
+run cannot complete); the report, the failing partitions' timelines and the history are in
+`accuracy/` of the job's artifacts.
 
-## Accuracy oracle on vibesys-evaluator's `check` (not wired yet)
+Faults (`Fault` is nil in the oracle: none of them may change what a read returns):
 
-`evaluator/cmd/oracle` is the task's semantic oracle on the vibesys-evaluator Go checker
-(`go/check`, `sdk/vibesys-evaluator/docs/accuracy-checks.md`): `check.Main` over two
-`check.Spec`s from `internal/snspec`, whose verdicts are ANDed. It checks the same contract as
-`internal/oracle` (the check programs of `run.py check`, which stay the accuracy check until
-the accuracy command exists) over a captured history instead of a sequence of programs.
+- after phase 0, one pod of each of the twelve application Deployments, one after the other,
+  each waited for until the application serves again;
+- after phase 1, the cache tiers emptied in place: `flush_all` on the three memcached (bash's
+  `/dev/tcp`), `FLUSHALL` on `social-graph-redis` and `user-timeline-redis` (`redis-cli`);
+- after phase 2, every pod of each application Deployment at once, one Deployment after the
+  other.
+
+`home-timeline-redis` is the only store of home timelines in the pinned application (no
+persistence, no other copy) and MongoDB holds the data: neither is restarted or flushed.
+
+The accuracy workload (`evaluator/internal/snaccuracy`, see `evaluator/INTERFACE.md`) sends one
+action per operation, its Info the action's JSON: composes, follows and unfollows among 40 hot
+users (the 36 most active and the 4 most followed, whose posts fan out to thousands of seeded
+followers) and reads of their timelines, reads over the whole dataset as the benchmark draws them,
+a few registrations and a few invalid requests. The rate is fixed and modest so that the answers
+are judged, not the capacity: more than 1% of unknown outcomes (lost answers and 5xx) fails.
+
+## Accuracy oracle
+
+`evaluator/cmd/oracle` is the task's semantic oracle on the vibesys-evaluator checker
+(`check`, `sdk/vibesys-evaluator/docs/accuracy-checks.md`): `check.Main` over two `check.Spec`s
+from `internal/snspec`, whose verdicts are ANDed.
 
 - **`AuthorSpec`**, per author (`u:<id>`: composes, registration, follow edges that point at the
   user, its user timeline, and every home read projected to the authors on its page; `n:<name>`
@@ -75,27 +73,23 @@ the accuracy command exists) over a captured history instead of a sequence of pr
 - **`ReaderSpec`**, per reader (`r:<reader>`): the page arithmetic across authors, which the author
   view cannot see ("page starts too new", an empty page with posts that must be there). Every
   compose is replicated into the partitions of the readers that could receive it.
+- **Projection**: two passes over the history (`check.Spec.Project` may range the phases more
+  than once): the first collects who is registered, who follows, mentions and reads whom (ids
+  only), the second adds the pieces, so memory stays at one phase plus those facts.
 - **Faults**: `Fault` is nil in both. Every acknowledged write survives a restart or a flush, so
   a post, edge or timeline entry lost across one shows as an entry that must be visible and is
   missing. A lost response or 5xx is an unknown outcome (`EffectWindow` 10 s).
-- **Contract with the accuracy workload** (not written yet): each call's Info is the JSON of its
-  `oracle.Action` (what it sends) and its one step is the HTTP request of `oracle.Request`;
-  `snspec.FromOracleCall` builds that from an `oracle.Call`. Writes stay under about 12
-  operations in flight per author or reader, and under 1% unknown outcomes.
 - **Tests**: `go test ./internal/snspec` (crafted histories for every rule, and 15 runs of the
   in-process fake application: correct with a synchronous or an asynchronous fan-out and with
   timeouts, and injected bugs: stale beyond the bound, stale cache or replica, a missing,
   phantom or misordered post, an unfollow ignored, posts lost on a restart, home timelines lost
   on a flush, a partial follower cache, a shifted page; `-short` skips the runs).
-  `SN_ORACLE_CAPTURE=<spike's sn/runs/real1/hist> go test -v ./cmd/oracle` checks the real
-  capture offline (171,000 calls, 2 restarts and 2 flushes: PASS; with newest posts dropped from
-  five pages: FAIL). The oracle binary must not link `internal/snworkload` (loadgen's protobuf
-  files clash with the checker's); `go.mod` requires the Go SDK at a pseudo-version of vibesys
-  main until its release.
-- **The accuracy command** will be the evaluator's accuracy flow (deploy, fixed-rate phases of
-  the accuracy workload, restart and flush faults between them, capture to a history
-  directory) followed by `oracle --history DIR`; then `run.py check`, `cmd/checker` and
-  `internal/oracle`'s programs go away.
+  `go test ./internal/snaccuracy` runs the accuracy workload itself against the fake application
+  with a restart and a flush: the correct fake passes, a stale cache, an ignored unfollow, posts
+  lost on a restart and a partial follower cache after a flush fail.
+  `SN_ORACLE_CAPTURE=<spike's sn/runs/real1/hist> go test -v ./cmd/oracle` checks the oracle
+  spike's real capture offline (171,000 calls, 2 restarts and 2 flushes: PASS; with newest posts
+  dropped from five pages: FAIL).
 
 ## Image and build
 
@@ -126,7 +120,7 @@ Requests equal limits on every container (Guaranteed QoS).
 | Redis 6.2.4 | home-timeline, social-graph, user-timeline | 1 CPU, 4 GiB, no persistence, maxmemory 3 GB noeviction | 3 |
 | memcached 1.6.7 | post-storage, url-shorten, user | 1 CPU, 1 GiB, `-m 512 -t 2` | 3 |
 | jaeger 1.57 all-in-one | jaeger | 2 CPU, 2 GiB, 100k traces in memory | 2 |
-| Pods | the benchmark's phase and seed pods (vibesys-evaluator's sizes); the check's seed Job (4 CPU, 2 GiB) | | |
+| Pods | the phase and seed pods of a benchmark sample or an accuracy check (vibesys-evaluator's sizes) | | |
 
 About 42 CPUs for the deployment, plus the phase pod while a load phase runs. The media service has no
 database in the pinned application (its MongoDB and memcached of the Helm chart are omitted),
@@ -168,4 +162,4 @@ The seed writes the dataset with its indexes (evaluator `cmd/seed`): `user.usern
 | `KUBECONFIG` | Kubeconfig of the cluster; its server address must be reachable from the job's network namespace (host networking). |
 | `VIBESYS_K8S_REGISTRY` | Registry as both BuildKit and the cluster's nodes pull it, for example `localhost:5001` (plain http). |
 | `VIBESYS_K8S_BUILDER` | BuildKit address, for example `tcp://127.0.0.1:1234`. |
-| `VIBESYS_ARTIFACTS_DIR` | Optional. The check's build, seed and container logs and `pods.txt`; the benchmark's sample records (vibesys-evaluator). |
+| `VIBESYS_ARTIFACTS_DIR` | Optional. The benchmark's sample records and the accuracy check's report and history (`accuracy/`), by vibesys-evaluator. |

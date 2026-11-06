@@ -13,7 +13,7 @@ import (
 
 	"github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go/check"
 
-	"vibesys/social-network-k8s-evaluator/internal/oracle"
+	"vibesys/social-network-k8s-evaluator/internal/snapi"
 	"vibesys/social-network-k8s-evaluator/internal/snspec"
 )
 
@@ -21,7 +21,7 @@ import (
 // closed-loop clients for five 20 s phases, a restart or a cache flush between them: 171,000
 // calls, 2 restarts and 2 flushes): it must pass with both specs. It reads
 // $SN_ORACLE_CAPTURE, the spike's sn/runs/real1/hist directory (phase<i>/history.jsonl, the
-// oracle.Calls of each phase, faults.json and dataset.json), converts it to a history with
+// snapi.Calls of each phase, faults.json and dataset.json), converts it to a history with
 // check.NewHistory (each call's Info is its action, see snspec.FromOracleCall) and is skipped
 // without it.
 func TestRealCapture(t *testing.T) {
@@ -77,7 +77,7 @@ func loadCapture(t *testing.T, dir string) *check.History {
 		for sc.Scan() {
 			var rec struct {
 				Src  string
-				Call oracle.Call
+				Call snapi.Call
 			}
 			if err := json.Unmarshal(sc.Bytes(), &rec); err != nil {
 				t.Fatal(err)

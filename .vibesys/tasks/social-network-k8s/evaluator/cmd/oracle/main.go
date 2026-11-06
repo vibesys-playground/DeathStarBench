@@ -1,18 +1,15 @@
 // Command oracle is the social-network-k8s task's accuracy oracle on vibesys-evaluator's
 // checker (go/check): it checks a captured history of the accuracy workload against the
-// contract in internal/snspec (OBJECTIVE.md and internal/oracle) with two specs, per author and
+// contract in internal/snspec (OBJECTIVE.md and internal/snapi) with two specs, per author and
 // per reader, whose verdicts are ANDed.
 //
 //	oracle --history DIR [--out /vibesys/artifacts/accuracy] [budget flags]
 //
 // DIR is the history directory the accuracy capture wrote (vibesys-evaluator's spec.md,
 // "Accuracy history"), with the dataset file the workload read ({"seed": N, "digest": "..."},
-// bench.py's dataset). Each call's Info is the JSON of its oracle.Action and its one step is the
+// bench.py's dataset). Each call's Info is the JSON of its snapi.Action and its one step is the
 // request that action makes. The exit status is 0 for PASS, 1 for FAIL and 2 for UNKNOWN, with
 // the reason on stderr.
-//
-// The binary must not link vibesys-evaluator's loadgen module (snworkload does): both modules
-// register the same protobuf files.
 package main
 
 import (

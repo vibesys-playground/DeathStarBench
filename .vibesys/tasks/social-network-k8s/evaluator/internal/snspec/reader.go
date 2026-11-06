@@ -16,7 +16,7 @@ import (
 	"github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go/check"
 
 	"vibesys/social-network-k8s-evaluator/internal/dataset"
-	"vibesys/social-network-k8s-evaluator/internal/oracle"
+	"vibesys/social-network-k8s-evaluator/internal/snapi"
 )
 
 type V2Compose struct {
@@ -62,11 +62,13 @@ func ReaderSpec(d *dataset.Dataset, bound, slack time.Duration) *check.Spec[Stat
 
 // DefaultReaderSpec uses the task's bound and slack.
 func DefaultReaderSpec(d *dataset.Dataset) *check.Spec[State, any, any] {
-	return ReaderSpec(d, Bound, oracle.DefaultSlack)
+	return ReaderSpec(d, Bound, Slack)
 }
 
+// projectReader is the reader view's Project: the facts in a first pass over the phases, then
+// each checkable home read and the writes its reader could receive.
 func (m *Model) projectReader(phases iter.Seq[[]check.Call], out *projection) error {
-	h, err := collect(phases)
+	h, err := m.collect(phases)
 	if err != nil {
 		return err
 	}
@@ -80,63 +82,10 @@ func (m *Model) projectReader(phases iter.Seq[[]check.Call], out *projection) er
 		}
 		return ""
 	}
-	// Readers with a checkable home read.
-	type rd struct {
-		ac *acall
-		in V2Read
-	}
-	var reads []rd
-	readers := map[int64]bool{}
-	for i := range h.calls {
-		ac := &h.calls[i]
-		a := ac.a
-		if a.Kind != oracle.KindRead || !a.Home || ac.unknown || ac.ro.Status != 200 || ac.ro.ParseErr != "" {
-			continue
-		}
-		user, e1 := strconv.ParseInt(a.UserID, 10, 64)
-		start, e2 := strconv.Atoi(a.Start)
-		stop, e3 := strconv.Atoi(a.Stop)
-		if e1 != nil || e2 != nil || e3 != nil || start < 0 || start >= stop || !(h.known[user] || m.seededUser(user) >= 0) {
-			continue
-		}
-		info := pageInfo(ac.ro.Page)
-		cutoff := int64(-1 << 62)
-		if info.Len == stop-start {
-			cutoff = info.Lo
-		}
-		in := V2Read{Reader: user, Start: start, End: stop, Holds: a.Holds, Page: info}
-		if ui := m.seededUser(user); ui >= 0 {
-			for _, p := range d.Home.Row(ui) {
-				post := &d.Posts[p]
-				if post.Timestamp < cutoff {
-					break
-				}
-				sc := SeedCandA{SeedCand{Idx: p, TS: post.Timestamp, Mentioned: slices.Contains(post.Mentions, int32(ui))}, d.Users[post.Author].ID}
-				in.Row = append(in.Row, sc)
-			}
-			for v := range h.changedBy[user] {
-				if iv := m.seededUser(v); iv >= 0 && !d.Follows(ui, iv) {
-					for _, p := range d.UserPosts.Row(iv) {
-						post := &d.Posts[p]
-						if post.Timestamp < cutoff {
-							break
-						}
-						if !slices.Contains(post.Mentions, int32(ui)) {
-							in.Extra = append(in.Extra, SeedCandA{SeedCand{Idx: p, TS: post.Timestamp}, v})
-						}
-					}
-				}
-			}
-		}
-		reads = append(reads, rd{ac, in})
-		readers[user] = true
-	}
-	for _, r := range reads {
-		out.Add(piece{Keys: []string{rkey(r.in.Reader)}, In: r.in, Out: r.ac.ro, Origin: r.ac.origin})
-	}
-	// Recipients of a compose by a: readers that follow (seeded), changed edge, or are mentioned.
+	// Recipients of a compose by a: readers that follow a (seeded), changed their edge to a, or
+	// are mentioned.
 	followersOf := map[int64][]int64{}
-	for u := range readers {
+	for u := range h.readers {
 		if ui := m.seededUser(u); ui >= 0 {
 			for _, f := range d.Followees.Row(ui) {
 				followersOf[d.Users[f].ID] = append(followersOf[d.Users[f].ID], u)
@@ -146,14 +95,17 @@ func (m *Model) projectReader(phases iter.Seq[[]check.Call], out *projection) er
 			followersOf[v] = append(followersOf[v], u)
 		}
 	}
-	for i := range h.calls {
-		ac := &h.calls[i]
+	return calls(phases, func(ac *acall) {
 		a := ac.a
 		wo := WriteOut{Status: ac.status, Acked: ac.acked}
 		switch a.Kind {
-		case oracle.KindCompose:
+		case snapi.KindRead:
+			if in, ok := m.readerRead(ac, h); ok {
+				out.Add(piece{Keys: []string{rkey(in.Reader)}, In: in, Out: ac.ro, Origin: ac.origin})
+			}
+		case snapi.KindCompose:
 			if a.Text == "" {
-				continue
+				return
 			}
 			cp := Compose{Author: a.User, AuthorName: nameOf(a.User), Marker: a.Marker, Text: a.Text, URL: a.URL, Mentions: a.Mentions, Media: a.Media}
 			for _, v := range a.Mentions {
@@ -164,20 +116,60 @@ func (m *Model) projectReader(phases iter.Seq[[]check.Call], out *projection) er
 				rec[u] = true
 			}
 			for _, v := range a.Mentions {
-				if readers[v] {
+				if h.readers[v] {
 					rec[v] = true
 				}
 			}
 			for u := range rec {
 				out.Add(piece{Keys: []string{rkey(u)}, In: V2Compose{cp, m.seededFollows(u, a.User)}, Out: wo, Write: true, Unknown: ac.unknown, Origin: ac.origin})
 			}
-		case oracle.KindFollow:
-			if readers[a.User] {
+		case snapi.KindFollow:
+			if h.readers[a.User] {
 				out.Add(piece{Keys: []string{rkey(a.User)}, In: V2Follow{Follow{U: a.User, V: a.Followee, On: a.On}}, Out: wo, Write: true, Unknown: ac.unknown, Origin: ac.origin})
 			}
 		}
+	})
+}
+
+// readerRead is the reader view's piece of a home read it can check: answered 200 with a page
+// that parses, a valid window, a known reader.
+func (m *Model) readerRead(ac *acall, h *facts) (V2Read, bool) {
+	a := ac.a
+	user, start, stop, valid := pageWindow(a)
+	if !a.Home || ac.unknown || ac.ro.Status != 200 || ac.ro.ParseErr != "" || !valid || !h.readers[user] {
+		return V2Read{}, false
 	}
-	return nil
+	d := m.Data
+	info := pageInfo(ac.ro.Page)
+	cutoff := int64(-1 << 62)
+	if info.Len == stop-start {
+		cutoff = info.Lo
+	}
+	in := V2Read{Reader: user, Start: start, End: stop, Holds: a.Holds, Page: info}
+	if ui := m.seededUser(user); ui >= 0 {
+		for _, p := range d.Home.Row(ui) {
+			post := &d.Posts[p]
+			if post.Timestamp < cutoff {
+				break
+			}
+			sc := SeedCandA{SeedCand{Idx: p, TS: post.Timestamp, Mentioned: slices.Contains(post.Mentions, int32(ui))}, d.Users[post.Author].ID}
+			in.Row = append(in.Row, sc)
+		}
+		for v := range h.changedBy[user] {
+			if iv := m.seededUser(v); iv >= 0 && !d.Follows(ui, iv) {
+				for _, p := range d.UserPosts.Row(iv) {
+					post := &d.Posts[p]
+					if post.Timestamp < cutoff {
+						break
+					}
+					if !slices.Contains(post.Mentions, int32(ui)) {
+						in.Extra = append(in.Extra, SeedCandA{SeedCand{Idx: p, TS: post.Timestamp}, v})
+					}
+				}
+			}
+		}
+	}
+	return in, true
 }
 
 func (m *Model) stepReader(s State, in, outAny any, call, ret int64) (State, string) {

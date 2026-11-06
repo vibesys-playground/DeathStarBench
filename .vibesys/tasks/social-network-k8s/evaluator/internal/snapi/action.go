@@ -1,4 +1,7 @@
-package oracle
+// Package snapi is Social Network's public API as the task's workloads and oracle see it: an
+// Action (what one call sends, never an expected answer), its HTTP request on nginx-thrift's
+// routes, and a Call (an action as executed, with its times and answer).
+package snapi
 
 import (
 	"fmt"
@@ -118,8 +121,6 @@ type Call struct {
 	Status int    `json:"status"`
 	Body   []byte `json:"body,omitempty"`
 	Err    string `json:"error,omitempty"`
-	// Pending: a write applied while a benchmark phase is generated (no times, no answer).
-	Pending bool `json:"pending,omitempty"`
 }
 
 func (c Call) answer() string {
