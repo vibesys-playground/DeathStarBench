@@ -226,7 +226,7 @@ def dataset() -> ds.Spec:
 # built as hotel-oracle: internal/hotelspec on vibesys-evaluator's checker) on the history. The
 # report, the failures' timelines and the history go to /vibesys/artifacts/accuracy.
 #
-# The load: a fixed, modest rate (the base serves about 450 operations/s of the benchmark's
+# The load: a fixed, modest rate (the base serves about 390 operations/s of the benchmark's
 # mix in a closed loop; at 200/s its p99 is about 4 ms), so that the answers are judged, not the
 # capacity: the base lost no answer and had at most 3 operations of one hotel in flight at once
 # (the report's MaxInFlight). Four phases of 30 s: about 26,000 operations, most of them on the
