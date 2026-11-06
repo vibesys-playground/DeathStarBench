@@ -1,12 +1,8 @@
 // Package hotelworkload is the hotel-k8s benchmark's workload on the vibesys-evaluator Go SDK:
-// the operations of the mix with their weights, how each request is drawn, how a write changes
-// the model, and how each response is checked after the phase. cmd/generator runs it as the
-// generator that loadgen reads the request stream from (bench.py names it).
-//
-// The model is the accuracy oracle's: the dataset file dataset.py writes (internal/dataset),
-// the reference answers of the pinned application over it (hotel.Reference) and the state that
-// writes change (hotel.State), with the visibility rule of OBJECTIVE.md (a read may show any
-// value written within the last second) kept per item in workload.Versions.
+// the operations of the mix with their weights and how each request is drawn. cmd/generator runs
+// it as the generator that loadgen reads the request stream from (bench.py names it). A benchmark
+// only measures: whether the answers are right is the accuracy check's (accuracy.py, with its own
+// workload in internal/hotelaccuracy and the oracle in internal/hotelspec).
 //
 // Request distributions (each draw from the operation's own stream): locations by city
 // popularity (Zipf, s = 1) with normal offsets of the city's hotel spread, written with 5
@@ -14,8 +10,9 @@
 // (s = 0.75); hotels for rates, reservations and writes by popularity (a city by Zipf rank, then
 // a hotel by Zipf rank, s = 0.75, within it). About 1% of the mix are admin writes.
 //
-// The stream is the one the task's earlier Python workload (bench.py) wrote, draw for draw:
-// cmd/generator's stream test pins it.
+// Every phase builds its model afresh (the SDK keeps nothing between phases): the reservation
+// nights and the added hotels' numbers of a phase are its own block (BeginPhase), so no phase
+// reserves a slot or adds a hotel an earlier one did.
 package hotelworkload
 
 import (
@@ -24,30 +21,28 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen/workload"
+	"github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go/workload"
 
-	"vibesys/hotel-k8s-evaluator/internal/appsupport/hotel"
 	"vibesys/hotel-k8s-evaluator/internal/dataset"
+	"vibesys/hotel-k8s-evaluator/internal/hotelref"
 )
 
 const (
-	// StalenessBound is the visibility contract of OBJECTIVE.md.
-	StalenessBound = time.Second
-
 	// A sample books far-future nights only, outside the rate window that searches use: a
 	// block of reservationNights from a night drawn per sample, at most reservationsPerNight
 	// distinct hotels per night, so every reservation finds its hotel's whole capacity free
-	// (the application cannot delete reservations).
+	// (the application cannot delete reservations). Phase p starts at night p*phaseNights.
 	reservationNights    = 512 * 16
 	reservationsPerNight = 128
+	maxPhases            = 16
+	phaseNights          = reservationNights / maxPhases
+	additionsPerPhase    = 1 << 20     // added hotel n of phase p is p*additionsPerPhase + n
 	reservationRange     = 146097 * 17 // days of seventeen 400-year cycles: four-digit years
 	reservationAttempts  = 16          // popularity draws of a hotel free that night, then the city's next
 	writeAttempts        = 16          // popularity draws of a capacity-managed hotel, then the city's next
 	sandboxShare         = 0.03        // searches and distance recommendations near an addition
 	sandboxJitterKm      = 0.5
-	maxOptionalAdditions = 8 // beyond it a sandbox answer is only checked for membership
 	searchAttempts       = 8 // redraws of a location where geo's own ranking ties
-	geoMaxResults        = 5 // the geo service's maxSearchResults
 	customerMask         = 1<<63 - 1
 )
 
@@ -57,32 +52,23 @@ var (
 	stayNights = []float64{30, 24, 16, 11, 8, 6, 5}
 )
 
-// Model is the seeded data plus this sample's writes, with their times.
-//
-// It is built in each phase pod from the dataset and the sample's stream, then every earlier
-// write of the sample is replayed into it through its Apply, so a phase continues from the
-// values the earlier ones wrote. Generation applies a write as pending as soon as it is built;
-// the check sees every write with its outcome and times.
+// Model is what a phase draws its requests from: the seeded data, its reference answers, and
+// the reservation slots and added hotels this phase has used so far.
 type Model struct {
 	data *dataset.Dataset
-	ref  *hotel.Reference
-	// state is the oracle's model with every write applied, pending ones included: what
-	// generation builds on (a profile write keeps the latest name).
-	state *hotel.State
+	ref  *hotelref.Reference
 	// managed[i]: a quarter of the hotels, fixed by index, whose capacity set_capacity changes
 	// and that reservations never book.
 	managed []bool
 
-	profiles  *workload.Versions[string, hotel.Profile]
-	prices    *workload.Versions[hotel.PlanKey, hotel.Prices]
-	rooms     *workload.Versions[string, int]
-	additions *workload.Versions[string, bool] // true once the hotel is added
-	added     []*dataset.Hotel                 // additions built or sent, in order
-	confirmed []*dataset.Hotel                 // additions acknowledged in earlier phases
-
-	firstNight   time.Time
-	nextSlot     int
-	used         map[int]map[int]bool // night -> hotel indices reserved on it
+	added      []*dataset.Hotel // this phase's additions, in order
+	firstNight time.Time
+	nextSlot   int
+	used       map[int]map[int]bool // night -> hotel indices reserved on it
+	// capacitySet: the hotels this phase has written a capacity to. A hotel takes at most one
+	// capacity write a phase, so no two of them overlap: a probe that follows its write could
+	// otherwise see a concurrent, larger capacity, take its rooms, and make later writes 409.
+	capacitySet  map[int]bool
 	nextAddition int
 	cell         uint64 // the sandbox cell of this sample's additions
 	tag          uint64 // added hotels are a<tag>-<n>
@@ -92,15 +78,12 @@ type Model struct {
 
 // NewModel is the model of a sample: rand is the sample's model stream.
 func NewModel(data *dataset.Dataset, rand *workload.Rand) (*Model, error) {
-	ref := hotel.NewReference(data)
+	ref := hotelref.NewReference(data)
 	m := &Model{
-		data: data, ref: ref, state: hotel.NewState(ref),
+		data: data, ref: ref,
 		managed:      make([]bool, data.HotelCount()),
-		profiles:     workload.NewVersions[string, hotel.Profile](StalenessBound),
-		prices:       workload.NewVersions[hotel.PlanKey, hotel.Prices](StalenessBound),
-		rooms:        workload.NewVersions[string, int](StalenessBound),
-		additions:    workload.NewVersions[string, bool](StalenessBound),
 		used:         map[int]map[int]bool{},
+		capacitySet:  map[int]bool{},
 		nextAddition: 1,
 		// An addition's rating stays below the best and its price above the cheapest, so the
 		// "rate" and "price" recommendations never change.
@@ -114,6 +97,17 @@ func NewModel(data *dataset.Dataset, rand *workload.Rand) (*Model, error) {
 	m.cell = uint64(rand.Below(int(dataset.SandboxCount())))
 	m.tag = uint64(rand.Below(1 << 48))
 	return m, nil
+}
+
+// BeginPhase moves the model to the phase's own block of reservation nights and addition numbers.
+func BeginPhase(m *Model, phase int) error {
+	if phase < 0 || phase >= maxPhases {
+		return fmt.Errorf("phase %d: a sample has at most %d phases", phase, maxPhases)
+	}
+	m.nextSlot = phase * phaseNights * reservationsPerNight
+	m.nextAddition = 1 + phase*additionsPerPhase
+	clear(m.capacitySet)
+	return nil
 }
 
 // CapacityManaged says whether set_capacity changes the hotel of this index (and reservations
@@ -181,13 +175,13 @@ func (m *Model) user(rand *workload.Rand) *dataset.User {
 	return &m.data.Users[rand.Zipf(len(m.data.Users), 0.75)]
 }
 
-// sandboxLocation is, 3% of the time, a point within 0.5 km of an addition acknowledged in an
-// earlier phase.
+// sandboxLocation is, 3% of the time, a point within 0.5 km of an addition this phase sent
+// earlier.
 func (m *Model) sandboxLocation(rand *workload.Rand) (lat, lon string, ok bool) {
-	if rand.Random() >= sandboxShare || len(m.confirmed) == 0 {
+	if rand.Random() >= sandboxShare || len(m.added) == 0 {
 		return "", "", false
 	}
-	anchor := m.confirmed[rand.Below(len(m.confirmed))]
+	anchor := m.added[rand.Below(len(m.added))]
 	_, _, kmPerLon := dataset.Sandbox(m.cell)
 	dy := (2*rand.Random() - 1) * sandboxJitterKm
 	dx := (2*rand.Random() - 1) * sandboxJitterKm
@@ -205,50 +199,6 @@ func (m *Model) addition(n int, seed uint64) *dataset.Hotel {
 
 // ------------------------------------------------------------------------ operations
 
-// The infos: what each request was built from, as its Call's Info.
-type (
-	expectedInfo struct {
-		Expected []string `json:"expected"`
-	}
-	nearInfo struct {
-		Near [2]string `json:"near"`
-	}
-	searchInfo struct {
-		Expected *[]string `json:"expected"`
-		Near     [2]string `json:"near"`
-	}
-	locationInfo struct {
-		Lat     string `json:"lat"`
-		Lon     string `json:"lon"`
-		Sandbox bool   `json:"sandbox,omitempty"`
-	}
-	reservationInfo struct {
-		Slot  int `json:"slot"`
-		Hotel int `json:"hotel"`
-	}
-	rateInfo struct {
-		Hotel  string     `json:"hotel"`
-		Code   string     `json:"code"`
-		Prices [3]float64 `json:"prices"`
-	}
-	profileInfo struct {
-		Hotel string `json:"hotel"`
-		Name  string `json:"name"`
-		Phone string `json:"phone"`
-	}
-	capacityInfo struct {
-		Hotel string `json:"hotel"`
-		Rooms int    `json:"rooms"`
-	}
-	additionInfo struct {
-		N    int    `json:"n"`
-		Seed uint64 `json:"seed"`
-	}
-	hotelInfo struct {
-		Hotel string `json:"hotel"`
-	}
-)
-
 var (
 	query  = workload.Query[string]
 	get    = workload.Get[string]
@@ -256,19 +206,20 @@ var (
 	locale = query("locale", "en")
 )
 
+func request(steps ...workload.Step) workload.Request { return workload.Request{Steps: steps} }
+
+// search is a stay at a location; 3% of them near an addition. A location where geo's own
+// ranking ties is redrawn (searchAttempts), as when the benchmark checked the answers, so the
+// request distribution is the one the objectives' baselines were measured with.
 func (m *Model) search(rand *workload.Rand) workload.Request {
 	nearLat, nearLon, near := m.sandboxLocation(rand.Child("sandbox"))
 	in, out := stay(rand.Child("stay"))
 	if near {
-		return workload.Request{
-			Steps: []workload.Step{get("/hotels", query("inDate", in), query("outDate", out),
-				query("lat", nearLat), query("lon", nearLon))},
-			Info: nearInfo{Near: [2]string{nearLat, nearLon}},
-		}
+		return request(get("/hotels", query("inDate", in), query("outDate", out), query("lat", nearLat), query("lon", nearLon)))
 	}
 	for attempt := range searchAttempts {
 		lat, lon := m.location(rand.Child("location", attempt))
-		expected, exact, err := m.ref.SearchCandidates(lat, lon)
+		_, exact, err := m.ref.SearchCandidates(lat, lon)
 		if err != nil {
 			panic(err)
 		}
@@ -277,10 +228,7 @@ func (m *Model) search(rand *workload.Rand) workload.Request {
 			if rand.Random() < 0.5 {
 				options = append(options, locale)
 			}
-			if expected == nil {
-				expected = []string{}
-			}
-			return workload.Request{Steps: []workload.Step{get("/hotels", options...)}, Info: expectedInfo{expected}}
+			return request(get("/hotels", options...))
 		}
 	}
 	panic(fmt.Sprintf("no unambiguous search location in %d draws", searchAttempts))
@@ -290,10 +238,7 @@ func recommend(require string) func(*Model, *workload.Rand) workload.Request {
 	return func(m *Model, rand *workload.Rand) workload.Request {
 		if require == "dis" {
 			if lat, lon, near := m.sandboxLocation(rand.Child("sandbox")); near {
-				return workload.Request{
-					Steps: []workload.Step{get("/recommendations", query("require", require), query("lat", lat), query("lon", lon))},
-					Info:  locationInfo{Lat: lat, Lon: lon, Sandbox: true},
-				}
+				return request(get("/recommendations", query("require", require), query("lat", lat), query("lon", lon)))
 			}
 		}
 		lat, lon := m.location(rand.Child("location"))
@@ -301,7 +246,7 @@ func recommend(require string) func(*Model, *workload.Rand) workload.Request {
 		if rand.Random() < 0.5 {
 			options = append(options, locale)
 		}
-		return workload.Request{Steps: []workload.Step{get("/recommendations", options...)}, Info: locationInfo{Lat: lat, Lon: lon}}
+		return request(get("/recommendations", options...))
 	}
 }
 
@@ -312,22 +257,15 @@ func login(valid bool) func(*Model, *workload.Rand) workload.Request {
 		if !valid {
 			password += "-invalid"
 		}
-		return workload.Request{Steps: []workload.Step{get("/user", query("username", u.Username), query("password", password))}}
+		return request(get("/user", query("username", u.Username), query("password", password)))
 	}
 }
 
-// reserveCapacity reserves a hotel's whole capacity on a sample-owned night, then one room
-// more (rejected). Exclusive serializes every reservation: the service's capacity check and
-// write are not transactional, so two concurrent fills could both see free rooms and the
-// rejection would not be determined.
+// reserveCapacity reserves a hotel's whole capacity on a night of the phase's block, then one
+// room more (rejected while the night is full). Each takes its own (night, hotel) slot, so no two
+// reservations of a sample book the same hotel on the same night and they may run concurrently.
 func (m *Model) reserveCapacity(rand *workload.Rand) workload.Request {
-	slot := m.nextSlot
-	night := slot / reservationsPerNight
-	if night >= reservationNights {
-		panic(fmt.Sprintf("the sample used its %d reservation slots", reservationNights*reservationsPerNight))
-	}
-	used := m.used[night]
-	index := m.pickHotel(rand, reservationAttempts, func(i int) bool { return !used[i] && !m.managed[i] })
+	night, index := m.reservationSlot(rand)
 	id, capacity := dataset.HotelID(index), m.data.Capacity(index)
 	u := m.user(rand.Child("user"))
 	in := m.firstNight.AddDate(0, 0, night)
@@ -337,11 +275,24 @@ func (m *Model) reserveCapacity(rand *workload.Rand) workload.Request {
 	with := func(rooms string) []workload.Option {
 		return append(append([]workload.Option(nil), common...), query("number", rooms))
 	}
-	return workload.Request{
-		Steps:     []workload.Step{get("/reservation", with(strconv.Itoa(capacity))...), get("/reservation", with("1")...)},
-		Info:      reservationInfo{Slot: slot, Hotel: index},
-		Exclusive: "reservation",
+	return request(get("/reservation", with(strconv.Itoa(capacity))...), get("/reservation", with("1")...))
+}
+
+// reservationSlot takes the next slot: its night (from the sample's first) and a popular hotel
+// not reserved on that night and not capacity-managed.
+func (m *Model) reservationSlot(rand *workload.Rand) (night, index int) {
+	night = m.nextSlot / reservationsPerNight
+	if night >= reservationNights {
+		panic(fmt.Sprintf("the sample used its %d reservation slots", reservationNights*reservationsPerNight))
 	}
+	if m.used[night] == nil {
+		m.used[night] = map[int]bool{}
+	}
+	used := m.used[night]
+	index = m.pickHotel(rand, reservationAttempts, func(i int) bool { return !used[i] && !m.managed[i] })
+	m.nextSlot++
+	used[index] = true
+	return night, index
 }
 
 // updateRate changes one plan of a popular hotel, its prices scaled by 0.8-1.25.
@@ -350,57 +301,42 @@ func (m *Model) updateRate(rand *workload.Rand) workload.Request {
 	plan := &h.RatePlans[rand.Below(len(h.RatePlans))]
 	total := dataset.Round(plan.TotalRate*(0.8+float64(0.45*rand.Random())), 100)
 	prices := [3]float64{total, total, dataset.Round(total*plan.TotalRateInclusive/plan.TotalRate, 100)}
-	// Writes to one item never overlap, so its versions are in application order.
-	return workload.Request{
-		Steps: []workload.Step{post("/admin/rate", query("hotelId", h.ID), query("code", plan.Code),
-			query("bookableRate", number(prices[0])), query("totalRate", number(prices[1])),
-			query("totalRateInclusive", number(prices[2])))},
-		Exclusive: "rate:" + h.ID + ":" + plan.Code,
-		Info:      rateInfo{Hotel: h.ID, Code: plan.Code, Prices: prices},
-	}
+	return request(post("/admin/rate", query("hotelId", h.ID), query("code", plan.Code),
+		query("bookableRate", number(prices[0])), query("totalRate", number(prices[1])),
+		query("totalRateInclusive", number(prices[2]))))
 }
 
 // updateProfile writes a new phone in the city's format; in 10% of the updates a new name too.
 func (m *Model) updateProfile(rand *workload.Rand) workload.Request {
 	h := m.popularHotel(rand.Child("hotel"))
-	profile, _ := m.state.Profile(h.ID)
-	name := profile.Name
 	phone := dataset.NewPhoneFrom(m.data, h, rand.Child("phone"))
 	options := []workload.Option{query("hotelId", h.ID), query("phone", phone)}
 	if rand.Random() < 0.1 {
-		name = dataset.NewNameFrom(m.data, h, rand.Child("name"))
-		options = append(options, query("name", name))
+		options = append(options, query("name", dataset.NewNameFrom(m.data, h, rand.Child("name"))))
 	}
-	return workload.Request{
-		Steps:     []workload.Step{post("/admin/profile", options...)},
-		Exclusive: "profile:" + h.ID,
-		Info:      profileInfo{Hotel: h.ID, Name: name, Phone: phone},
-	}
+	return request(post("/admin/profile", options...))
 }
 
 // setCapacity sets a capacity-managed hotel's rooms to 0.5-2x the seeded ones, and above the
 // most rooms its seeded bookings hold on a night (so the write is accepted and every night
 // keeps a room), then reserves one room more: rejected at once.
 func (m *Model) setCapacity(rand *workload.Rand) workload.Request {
-	index := m.pickHotel(rand, writeAttempts, func(i int) bool { return m.managed[i] })
-	h := struct {
-		ID       string
-		Capacity int
-	}{dataset.HotelID(index), m.data.Capacity(index)}
-	low, high := max(1, h.Capacity/2, m.ref.SeededMaxRooms(h.ID)+1), 2*h.Capacity
-	rooms := low + int(rand.Random()*float64(high-low+1))
+	index, rooms := m.capacityWrite(rand)
+	id := dataset.HotelID(index)
 	u := m.user(rand.Child("user"))
 	probe := []workload.Option{query("inDate", day(m.firstNight)), query("outDate", day(m.firstNight.AddDate(0, 0, 1))),
-		query("hotelId", h.ID), query("customerName", fmt.Sprintf("vibesys-capacity-%016x", rand.Uint64()&customerMask)),
+		query("hotelId", id), query("customerName", fmt.Sprintf("vibesys-capacity-%016x", rand.Uint64()&customerMask)),
 		query("username", u.Username), query("password", u.Password), query("number", strconv.Itoa(rooms+1))}
-	return workload.Request{
-		Steps: []workload.Step{
-			post("/admin/capacity", query("hotelId", h.ID), query("rooms", strconv.Itoa(rooms))),
-			get("/reservation", probe...),
-		},
-		Exclusive: "capacity:" + h.ID,
-		Info:      capacityInfo{Hotel: h.ID, Rooms: rooms},
-	}
+	return request(post("/admin/capacity", query("hotelId", id), query("rooms", strconv.Itoa(rooms))), get("/reservation", probe...))
+}
+
+// capacityWrite is a capacity-managed hotel this phase has not written yet, and its new rooms.
+func (m *Model) capacityWrite(rand *workload.Rand) (index, rooms int) {
+	index = m.pickHotel(rand, writeAttempts, func(i int) bool { return m.managed[i] && !m.capacitySet[i] })
+	m.capacitySet[index] = true
+	capacity := m.data.Capacity(index)
+	low, high := max(1, capacity/2, m.ref.SeededMaxRooms(dataset.HotelID(index))+1), 2*capacity
+	return index, low + int(rand.Random()*float64(high-low+1))
 }
 
 // The admin route's body of an added hotel, its fields in the route's order.
@@ -443,7 +379,9 @@ type (
 
 func (m *Model) addHotel(rand *workload.Rand) workload.Request {
 	n, seed := m.nextAddition, uint64(rand.Below(1<<62))
+	m.nextAddition++
 	h := m.addition(n, seed)
+	m.added = append(m.added, h)
 	a := h.Address
 	body := addedHotel{
 		HotelID: h.ID, Name: h.Name, PhoneNumber: h.Phone, Description: h.Description,
@@ -456,82 +394,11 @@ func (m *Model) addHotel(rand *workload.Rand) workload.Request {
 			RoomType: addedRoom{Code: p.RoomCode, RoomDescription: p.RoomDescription, BookableRate: p.BookableRate,
 				TotalRate: p.TotalRate, TotalRateInclusive: p.TotalRateInclusive}})
 	}
-	return workload.Request{Steps: []workload.Step{post("/admin/hotel", workload.JSON(body))}, Info: additionInfo{N: n, Seed: seed}}
+	return request(post("/admin/hotel", workload.JSON(body)))
 }
 
 func (m *Model) rates(rand *workload.Rand) workload.Request {
-	h := m.popularHotel(rand)
-	return workload.Request{Steps: []workload.Step{get("/rates", query("hotelId", h.ID))}, Info: hotelInfo{h.ID}}
-}
-
-// ------------------------------------------------------------------ apply: writes -> model
-// Pending (no times) while the phase is generated; with the outcome and times when the history
-// is replayed. A failed write counts as possibly applied (Versions).
-
-func decode[T any](call workload.Call) (T, error) {
-	var info T
-	err := call.DecodeInfo(&info)
-	return info, err
-}
-
-func (m *Model) applyRate(call workload.Call) error {
-	info, err := decode[rateInfo](call)
-	if err != nil {
-		return err
-	}
-	prices := hotel.Prices{Bookable: info.Prices[0], Total: info.Prices[1], Inclusive: info.Prices[2]}
-	m.prices.Write(hotel.PlanKey{HotelID: info.Hotel, Code: info.Code}, prices, call)
-	return m.state.SetPrices(info.Hotel, info.Code, prices)
-}
-
-func (m *Model) applyProfile(call workload.Call) error {
-	info, err := decode[profileInfo](call)
-	if err != nil {
-		return err
-	}
-	m.profiles.Write(info.Hotel, hotel.Profile{Name: info.Name, Phone: info.Phone}, call)
-	return m.state.SetProfile(info.Hotel, info.Name, info.Phone)
-}
-
-func (m *Model) applyCapacity(call workload.Call) error {
-	info, err := decode[capacityInfo](call)
-	if err != nil {
-		return err
-	}
-	m.rooms.Write(info.Hotel, info.Rooms, call)
-	return m.state.SetCapacity(info.Hotel, info.Rooms)
-}
-
-func (m *Model) applyReservation(call workload.Call) error {
-	info, err := decode[reservationInfo](call)
-	if err != nil {
-		return err
-	}
-	if info.Hotel < 0 || info.Hotel >= m.data.HotelCount() {
-		return fmt.Errorf("reservation of hotel index %d", info.Hotel)
-	}
-	m.nextSlot = max(m.nextSlot, info.Slot+1)
-	night := info.Slot / reservationsPerNight
-	if m.used[night] == nil {
-		m.used[night] = map[int]bool{}
-	}
-	m.used[night][info.Hotel] = true
-	return nil
-}
-
-func (m *Model) applyAddition(call workload.Call) error {
-	info, err := decode[additionInfo](call)
-	if err != nil {
-		return err
-	}
-	h := m.addition(info.N, info.Seed)
-	m.nextAddition = max(m.nextAddition, info.N+1)
-	m.added = append(m.added, h)
-	m.additions.Write(h.ID, true, call)
-	if call.OK {
-		m.confirmed = append(m.confirmed, h)
-	}
-	return m.state.Add(*h)
+	return request(get("/rates", query("hotelId", m.popularHotel(rand).ID)))
 }
 
 // ------------------------------------------------------------------------------ workload
@@ -539,26 +406,22 @@ func (m *Model) applyAddition(call workload.Call) error {
 // Workload is the benchmark's mix: the weights of the task's earlier closed.toml and open.toml.
 func Workload() workload.Workload[*dataset.Dataset, *Model] {
 	return workload.Workload[*dataset.Dataset, *Model]{
-		Dataset: dataset.Read,
-		Model:   NewModel,
+		Dataset:    dataset.Read,
+		Model:      NewModel,
+		BeginPhase: BeginPhase,
 		Operations: []workload.Operation[*Model]{
-			{Name: "search_hotels", Weight: 6000, Build: (*Model).search, Check: (*Model).checkSearch},
-			{Name: "recommend_distance", Weight: 1300, Build: recommend("dis"), Check: checkRecommendation("dis")},
-			{Name: "recommend_rate", Weight: 1300, Build: recommend("rate"), Check: checkRecommendation("rate")},
-			{Name: "recommend_price", Weight: 1300, Build: recommend("price"), Check: checkRecommendation("price")},
-			{Name: "login_valid", Weight: 30, Build: login(true), Check: checkMessage(0, loginSuccess)},
-			{Name: "login_invalid", Weight: 20, Build: login(false), Check: checkMessage(0, loginFailure)},
-			{Name: "reserve_capacity", Weight: 50, Build: (*Model).reserveCapacity,
-				Check: checkMessages(reservationSuccess, reservationFailure), Apply: (*Model).applyReservation},
-			{Name: "hotel_rates", Weight: 400, Build: (*Model).rates, Check: (*Model).checkRates},
-			{Name: "update_rate", Weight: 42, Build: (*Model).updateRate,
-				Check: checkMessage(0, "Rate updated."), Apply: (*Model).applyRate},
-			{Name: "update_profile", Weight: 42, Build: (*Model).updateProfile,
-				Check: checkMessage(0, "Profile updated."), Apply: (*Model).applyProfile},
-			{Name: "set_capacity", Weight: 12, Build: (*Model).setCapacity,
-				Check: checkMessages("Capacity updated.", reservationFailure), Apply: (*Model).applyCapacity},
-			{Name: "add_hotel", Weight: 8, Build: (*Model).addHotel,
-				Check: checkMessage(0, "Hotel added."), Apply: (*Model).applyAddition},
+			{Name: "search_hotels", Weight: 6000, Build: (*Model).search},
+			{Name: "recommend_distance", Weight: 1300, Build: recommend("dis")},
+			{Name: "recommend_rate", Weight: 1300, Build: recommend("rate")},
+			{Name: "recommend_price", Weight: 1300, Build: recommend("price")},
+			{Name: "login_valid", Weight: 30, Build: login(true)},
+			{Name: "login_invalid", Weight: 20, Build: login(false)},
+			{Name: "reserve_capacity", Weight: 50, Build: (*Model).reserveCapacity},
+			{Name: "hotel_rates", Weight: 400, Build: (*Model).rates},
+			{Name: "update_rate", Weight: 42, Build: (*Model).updateRate},
+			{Name: "update_profile", Weight: 42, Build: (*Model).updateProfile},
+			{Name: "set_capacity", Weight: 12, Build: (*Model).setCapacity},
+			{Name: "add_hotel", Weight: 8, Build: (*Model).addHotel},
 		},
 	}
 }

@@ -14,7 +14,9 @@ the job that started it) on the data image (the task Dockerfile's `data` stage: 
 tier's mongod and the hotel-data command). The Job builds what the snapshot lacks (the first
 time a version is asked for: about 25 minutes for the task's dataset, see README.md) and
 otherwise only checks it and records its use; concurrent Jobs serialize on the snapshot's
-lock. bench.py (before a sample) and run.py (before the check, and `run.py data`) call it.
+lock. bench.py's `prepare` calls it before a benchmark sample and before accuracy.py's check;
+`python snapshot.py ensure` (in the task image, with the cluster's environment) only makes the
+snapshot exist, for example on a new cluster before its first job.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -182,3 +185,29 @@ def require_env(name: str) -> str:
     if not value:
         raise SnapshotError(f"{name} is not set")
     return value
+
+
+def main(argv: list[str]) -> int:
+    """`ensure`: build (or check) the node's snapshot of the task's dataset and wait for it."""
+    if argv != ["ensure"]:
+        print("usage: python snapshot.py ensure   (KUBECONFIG, VIBESYS_K8S_REGISTRY and VIBESYS_K8S_BUILDER set)",
+              file=sys.stderr)
+        return 2
+    sys.path.insert(0, str(TASK_DIR))
+    import dataset  # noqa: PLC0415
+
+    def log(line: str) -> None:
+        print(line, file=sys.stderr, flush=True)
+
+    try:
+        ensured = ensure(dataset.encode(dataset.generate()).decode(), registry=require_env("VIBESYS_K8S_REGISTRY"),
+                         builder=require_env("VIBESYS_K8S_BUILDER"), deadline_seconds=JOB_DEADLINE_SECONDS, log=log)
+    except SnapshotError as error:
+        log(f"snapshot: {error}")
+        return 1
+    log(f"data snapshot {ensured.version} is ready")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

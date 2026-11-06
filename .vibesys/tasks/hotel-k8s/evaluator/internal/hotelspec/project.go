@@ -25,10 +25,6 @@ type (
 
 func key(id string) []string { return []string{"h:" + id} }
 
-// staticKey holds the pieces of operations that depend on no hotel's state (a lost login):
-// they are unknown reads, which the check drops after counting them.
-var staticKey = []string{"x:static"}
-
 // project turns the history's calls into pieces: one per hotel an answer concerns. A response
 // that is wrong without any state (a malformed body, a hotel that is not seeded, a status the
 // operation never answers) is a violation.
@@ -367,7 +363,9 @@ func (d *decoder) call(c *check.Call) error {
 			return err
 		}
 		if unknown {
-			add(piece{Keys: staticKey, In: In{Kind: ReadProfile}})
+			// Which hotels a lost answer would have shown is unknown: a piece without keys, counted
+			// (toward the lost share) and never searched.
+			add(piece{In: In{Kind: ReadProfile}})
 			return nil
 		}
 		if step.Status != 200 {
@@ -401,7 +399,8 @@ func (d *decoder) call(c *check.Call) error {
 			return err
 		}
 		if unknown {
-			add(piece{Keys: staticKey, In: In{Kind: ReadProfile}})
+			// A login touches no hotel: a piece without keys, counted and never searched.
+			add(piece{In: In{Kind: ReadProfile}})
 			return nil
 		}
 		want := MsgLoginFail
@@ -410,7 +409,9 @@ func (d *decoder) call(c *check.Call) error {
 		}
 		if msg, err := message(step.Body); step.Status != 200 || err != nil || msg != want {
 			bad("login answered HTTP %d %q %v, want %q", step.Status, msg, err, want)
+			return nil
 		}
+		add(piece{In: In{Kind: ReadProfile}})
 	default:
 		return fmt.Errorf("unknown operation %q", c.Op)
 	}

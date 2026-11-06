@@ -4,12 +4,12 @@
 
 The five parts: (1) the system under test, (2) the initial data (seed),
 (3) the workload, (4) the benchmark function, (5) the validity rules. The
-data is dataset.py's. The workload (operations, request distributions, the
-model the writes change and the checks of the responses) is the Go generator
-of evaluator/cmd/generator, which shares its model with the accuracy oracle;
-this script orchestrates: it validates the candidate's application tier
-against the capacity envelope, makes sure the node holds the data snapshot
-(snapshot.py), deploys, runs the phases and reports.
+data is dataset.py's. The workload (operations and request distributions) is
+the Go generator of evaluator/cmd/generator; this script orchestrates: it
+validates the candidate's application tier against the capacity envelope,
+makes sure the node holds the data snapshot (snapshot.py), deploys, runs the
+phases and reports. A benchmark only measures: whether the answers are right
+is the accuracy check's (accuracy.py), which deploys the same system.
 """
 
 from __future__ import annotations
@@ -96,11 +96,10 @@ SYSTEM = k8s.App(
 
 
 # ------------------------------------------------------------ (3) workload
-# The operations, their weights, how each request is drawn, the model the writes change and
-# the checks are Go: evaluator/internal/hotelworkload on the vibesys-evaluator Go SDK, over
-# the accuracy oracle's own model (the dataset file, hotel.Reference, hotel.State). The task
-# image builds it as hotel-generator (evaluator/cmd/generator); each phase pod runs it under
-# loadgen to generate the request stream, then to check the phase's responses.
+# The operations, their weights and how each request is drawn are Go:
+# evaluator/internal/hotelworkload on the vibesys-evaluator Go SDK, over the dataset file and the
+# pinned application's reference answers (hotelref.Reference). The task image builds it as
+# hotel-generator (evaluator/cmd/generator); each phase pod runs it under loadgen.
 
 WORKLOAD = Generator(["hotel-generator"])  # on the task image's PATH
 
@@ -138,6 +137,14 @@ def benchmark(run: ms.Run) -> None:
 
 # ------------------------------------------------------------- (5) validity
 
+METRICS = {
+    "operations_per_second": vse.Metric(unit="ops/s", direction="max"),
+    "latency_ms.p99": vse.Metric(unit="ms", direction="min"),
+}
+# No error in any window, every operation of the mix completed, and the open loop offers at
+# least 95% of its rate.
+VALIDITY = vse.Validity(max_error_rate=0.0, min_sustained_ratio=0.95, min_ops_per_operation=1)
+
 _PREPARE_ERROR: list[Exception] = []
 
 # How long a sample waits for the data snapshot: a first build takes about 25 minutes; past
@@ -145,16 +152,22 @@ _PREPARE_ERROR: list[Exception] = []
 SNAPSHOT_WAIT_SECONDS = 2700
 
 
-def prepare(argv: list[str], target: Path, *, ensure=snapshot.ensure, environ=os.environ) -> envelope.App | None:
-    """For `benchmark`: validate the candidate's application tier, make sure the node holds
-    the data snapshot, and write the deployed manifest (restoring that snapshot).
+# The commands that deploy the system: this script's benchmark and accuracy.py's accuracy check.
+DEPLOYING = ("benchmark", "accuracy")
 
-    A failure is kept and raised by `dataset()`, the first thing a sample calls inside
-    its error handling and before it builds or deploys anything, so that the sample fails
-    with the validator's (or the snapshot's) message in its records. The envelope is checked
-    first: a candidate outside it fails before the snapshot is looked at.
+
+def prepare(argv: list[str], target: Path, *, ensure=snapshot.ensure, environ=os.environ) -> envelope.App | None:
+    """For `benchmark` (and accuracy.py's `accuracy`): validate the candidate's application tier,
+    make sure the node holds the data snapshot, and write the deployed manifest (restoring that
+    snapshot).
+
+    A failure is kept (`prepare_error()`) and raised by `dataset()`, the first thing a sample
+    calls inside its error handling and before it builds or deploys anything, so that the sample
+    fails with the validator's (or the snapshot's) message in its records. The envelope is
+    checked first: a candidate outside it fails before the snapshot is looked at. Returns the
+    candidate's tier, or None for another command or a failure.
     """
-    if argv[:1] != ["benchmark"]:
+    if not argv or argv[0] not in DEPLOYING:
         return None
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--project-root", type=Path, required=True)
@@ -184,6 +197,11 @@ def prepare(argv: list[str], target: Path, *, ensure=snapshot.ensure, environ=os
     return app
 
 
+def prepare_error() -> Exception | None:
+    """What made `prepare` fail, if it did."""
+    return _PREPARE_ERROR[0] if _PREPARE_ERROR else None
+
+
 def dataset() -> ds.Spec:
     if _PREPARE_ERROR:
         raise _PREPARE_ERROR[0]
@@ -197,11 +215,6 @@ if __name__ == "__main__":
         system=SYSTEM,
         workload=WORKLOAD,
         benchmark=benchmark,
-        metrics={
-            "operations_per_second": vse.Metric(unit="ops/s", direction="max"),
-            "latency_ms.p99": vse.Metric(unit="ms", direction="min"),
-        },
-        # No error and no failed check in any window, every operation of the mix
-        # completed, and the open loop offers at least 95% of its rate.
-        validity=vse.Validity(max_error_rate=0.0, min_sustained_ratio=0.95, min_ops_per_operation=1),
+        metrics=METRICS,
+        validity=VALIDITY,
     )

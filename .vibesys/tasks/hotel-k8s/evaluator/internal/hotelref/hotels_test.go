@@ -1,4 +1,4 @@
-package hotel
+package hotelref
 
 import (
 	"sync"

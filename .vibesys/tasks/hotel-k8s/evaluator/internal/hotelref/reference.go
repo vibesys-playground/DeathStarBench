@@ -1,4 +1,8 @@
-package hotel
+// Package hotelref answers the read paths of the pinned Hotel Reservation application over the
+// task's dataset (dataset.py's file): the geo part of search, the three recommendations,
+// profiles, logins and room capacities. The benchmark's and the accuracy check's workloads draw
+// their requests from it, and the accuracy oracle (internal/hotelspec) builds its catalog from it.
+package hotelref
 
 import (
 	"fmt"
@@ -13,8 +17,7 @@ import (
 // Reference answers what the pinned application returns for the task's
 // dataset, for the read paths whose answers depend only on the seeded data:
 // the geo part of search, the three recommendations, profiles, logins and
-// room capacities. The benchmark adapter and the accuracy oracle both compute
-// expected answers from it; availability (reservations) is theirs to model.
+// room capacities. Availability (reservations) is the oracle's to model.
 type Reference struct {
 	Data *dataset.Dataset
 

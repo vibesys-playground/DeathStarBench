@@ -5,9 +5,9 @@
 // do, and writes the golden file reference_test.go checks the emulation
 // against. It builds only inside hotelReservation/, which vendors the library:
 //
-//	go test ./internal/appsupport/hotel -run TestNearbyMatchesGeoindexGolden -args -geoindex-input=IN.json
-//	cd <repo>/hotelReservation && go run -mod=vendor <evaluator>/internal/appsupport/hotel/testdata/geoindexgolden/main.go IN.json OUT.json
-//	cp OUT.json <evaluator>/internal/appsupport/hotel/testdata/geoindex_golden.json
+//	go test ./internal/hotelref -run TestNearbyMatchesGeoindexGolden -args -geoindex-input=IN.json
+//	cd <repo>/hotelReservation && go run -mod=vendor <evaluator>/internal/hotelref/testdata/geoindexgolden/main.go IN.json OUT.json
+//	cp OUT.json <evaluator>/internal/hotelref/testdata/geoindex_golden.json
 package main
 
 import (

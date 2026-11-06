@@ -175,25 +175,24 @@ The contract:
 
 ## Correctness bar
 
-The check deploys the candidate and runs the Go semantic oracle in accuracy mode,
-inside the cluster against the frontend Service, opening a new connection for every
-request so that its reads reach every frontend pod. It passes only if every observation matches the reference behavior of the pinned
+The accuracy check deploys the candidate as a benchmark sample does and sends the task's
+accuracy workload through the frontend at a fixed, modest rate in four phases, with every
+answer recorded: searches, reservations that contend for the rooms of a few hotels,
+capacity, profile and price writes, rate and recommendation reads, logins. Between the
+phases it restarts one pod of each of the candidate's Deployments (one after the other,
+each waited for until the application serves again), empties the three memcached tiers in
+place, and restarts every pod of each Deployment at once. The task's oracle then judges the
+whole history; it passes only if every answer matches the reference behavior of the pinned
 application: the four frontend routes `/hotels`, `/recommendations`, `/user`,
 `/reservation` with exact response schemas and values over the task's dataset and the
-writes made so far; the owner routes and `/rates` with the contract above (the oracle
-reads every write at 1 s plus a margin, at least eight times so the reads reach every
-instance, and again after restarting one pod of every application Deployment and then
-all of them); reservation capacity by hotel and night (atomic, over-capacity
-rejection, no overselling of sequential requests, and a concurrent burst on one night
-accepts exactly the rooms left); degenerate date ranges; concurrent isolation; and
-durability: acknowledged reservations survive a restart of every application pod and of
-the reservation cache tier, and a restart of one pod of each application Deployment and
-of the reservation cache. A restart deletes the pods (1 s grace) and waits until their
-replacements are ready (below) before the oracle reads again.
-`/reservation` still reaches the reservation service after an invalid login, as in
-the pinned reference. The load generator checks every response of the benchmark the same
-way, accepting for each read exactly the values the contract allows given the writes it
-has made, and a single wrong answer fails the measurement.
+acknowledged writes, the owner routes and `/rates` with the contract above, reservation
+capacity by hotel and night (atomic, over-capacity rejection, no overselling, also when
+concurrent reservations of one night reach different instances), and durability across
+the restarts and flushes. `/reservation` still reaches the reservation service after an
+invalid login, as in the pinned reference. Lost answers and 5xx answers are unknown
+outcomes; more than 1% of them fails the check. The benchmark does not judge answers (an
+answer with another status than the operation expects is an error that invalidates its
+measurement); the accuracy check does.
 
 The reference semantics include these details, which an optimization must keep:
 - search answers the hotels that the pinned geo service returns (go-geoindex's

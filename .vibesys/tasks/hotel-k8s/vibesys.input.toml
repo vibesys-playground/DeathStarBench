@@ -7,13 +7,15 @@ domain = "microservices"
 [environment]
 needs = ["kubernetes"]
 
-# Both commands run the trusted task code baked into the task image at /task; they
-# read KUBECONFIG, VIBESYS_K8S_REGISTRY and VIBESYS_K8S_BUILDER from the environment.
-# The check is run.py (the Go semantic oracle); the benchmark is bench.py, on
-# vibesys-evaluator (one sample per run). The timeouts cover a job that finds no data
-# snapshot on the node and waits for its first build (about 25 minutes; snapshot.py).
+# Both commands run the trusted task code baked into the task image at /task, on
+# vibesys-evaluator; they read KUBECONFIG, VIBESYS_K8S_REGISTRY and VIBESYS_K8S_BUILDER from the
+# environment. The accuracy check is accuracy.py (vibesys-evaluator's accuracy run: phases of
+# the accuracy workload with every answer captured, faults between them, then the Go oracle on
+# the history; exit 0 PASS, 1 FAIL, 2 UNKNOWN); the benchmark is bench.py (one sample per run).
+# The timeouts cover a job that finds no data snapshot on the node and waits for its first
+# build (about 25 minutes; snapshot.py).
 [accuracy]
-command = ["python", "/task/run.py", "check", "--project-root", "${PROJECT_ROOT}"]
+command = ["python", "/task/accuracy.py", "accuracy", "--project-root", "${PROJECT_ROOT}"]
 timeout_seconds = 6000
 
 [benchmark]

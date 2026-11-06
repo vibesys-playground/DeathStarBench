@@ -331,17 +331,20 @@ class LoadTest(unittest.TestCase):
                 envelope.load(root)
 
     def test_composed_manifest_renders_with_the_application_after_the_seed(self):
-        from vibesys_evaluator.microservices._k8s import _manifest  # the package's own renderer (not public API)
-
+        # vibesys-evaluator applies the objects labelled tier=data (k8s.App(data_tier=)) before the
+        # seed and the rest after it: the candidate's Deployments are all in the rest.
         app = envelope.validate(
             (TASK_DIR / "tests" / "testdata" / "regrouped.yaml").read_text(), source="r", task_text=TASK_TEXT
         )
-        rendered = _manifest.render(
-            envelope.compose(app, "0123456789abcdef0123"), namespace="hk8s-0", images={"HOTEL_IMAGE": "img"},
-            data_tier={"tier": "data"},
-        )
-        self.assertEqual([o["metadata"]["name"] for o in rendered.rest], app.names)
-        self.assertIn(("Service", "frontend"), {(o["kind"], o["metadata"]["name"]) for o in rendered.first})
+        docs = [d for d in yaml.safe_load_all(envelope.compose(app, "0123456789abcdef0123")) if d]
+
+        def data_tier(doc: dict) -> bool:
+            return doc.get("metadata", {}).get("labels", {}).get("tier") == "data"
+
+        rest = [d for d in docs if not data_tier(d)]
+        self.assertEqual([d["metadata"]["name"] for d in rest if d["kind"] == "Deployment"], app.names)
+        self.assertIn(("Service", "frontend"), {(d["kind"], d["metadata"]["name"]) for d in docs})
+        self.assertTrue(any(data_tier(d) and d["kind"] == "Deployment" for d in docs))
 
 
 class FakeEnsure:

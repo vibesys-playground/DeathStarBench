@@ -16,21 +16,21 @@ import (
 
 	"github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go/check"
 
-	"vibesys/hotel-k8s-evaluator/internal/appsupport/hotel"
 	"vibesys/hotel-k8s-evaluator/internal/dataset"
+	"vibesys/hotel-k8s-evaluator/internal/hotelref"
 	"vibesys/hotel-k8s-evaluator/internal/hotelspec"
 )
 
 // datasetCatalog is the task's dataset as the model's catalog: hotels are generated from the
 // dataset's random streams when asked for (a few microseconds) and kept.
 type datasetCatalog struct {
-	ref *hotel.Reference
+	ref *hotelref.Reference
 	mu  sync.Mutex
 	got map[string]*hotelspec.Hotel
 }
 
 func newCatalog(data *dataset.Dataset) *datasetCatalog {
-	return &datasetCatalog{ref: hotel.NewReference(data), got: map[string]*hotelspec.Hotel{}}
+	return &datasetCatalog{ref: hotelref.NewReference(data), got: map[string]*hotelspec.Hotel{}}
 }
 
 func (c *datasetCatalog) Hotel(id string) (*hotelspec.Hotel, bool) {
@@ -45,7 +45,7 @@ func (c *datasetCatalog) Hotel(id string) (*hotelspec.Hotel, bool) {
 		return nil, false
 	}
 	capacity, _ := c.ref.Capacity(id)
-	lon, lat := hotel.EncodedCoordinates(full)
+	lon, lat := hotelref.EncodedCoordinates(full)
 	h := &hotelspec.Hotel{
 		ID: id, Capacity: capacity, SeededMaxRooms: c.ref.SeededMaxRooms(id),
 		Profile: hotelspec.Profile{Name: full.Name, Phone: full.Phone}, Lon: lon, Lat: lat,

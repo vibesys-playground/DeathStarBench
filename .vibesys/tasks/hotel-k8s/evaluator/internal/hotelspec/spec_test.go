@@ -303,3 +303,18 @@ func TestSampleSeedDoesNotChangeVerdicts(t *testing.T) {
 		}
 	}
 }
+
+// Logins and lost recommendations touch no hotel: pieces without keys, counted (a lost one toward
+// the lost share) and never searched.
+func TestLoginsAndLostRecommendationsAreKeyless(t *testing.T) {
+	b := b1()
+	b.add("login", LoginInfo{Valid: true}, 0, ms, 200, msgBody(msgLoginOK))
+	b.add("login", LoginInfo{Valid: false}, 2*ms, 3*ms, 200, msgBody(MsgLoginFail))
+	b.add("login", LoginInfo{Valid: true}, 4*ms, 5*ms, 0, nil)
+	b.add("recommend_rate", RecommendInfo{Require: "rate", Expected: []string{"1"}}, 6*ms, 7*ms, 503, nil)
+	r := check.Check(check.NewHistory(b.calls, nil), []check.AnySpec{Spec(cat)}, check.Options{MaxLostShare: 1})
+	c := r.Specs[0].Coverage
+	if r.Verdict != check.Pass || c.Keyless != 4 || c.UnknownPieces != 2 || len(r.Specs[0].Partitions) != 0 {
+		t.Fatalf("%s: %d keyless, %d unknown, %d partitions\n%s", r.Verdict, c.Keyless, c.UnknownPieces, len(r.Specs[0].Partitions), r.Text(5))
+	}
+}
