@@ -43,6 +43,10 @@ carry from phase to phase, so nothing is reset; each phase builds its model afre
 reservation nights and added hotels from its own block (`BeginPhase`), so its requests stay
 valid whatever the earlier phases wrote.
 
+Baseline (the base on vibesys-evaluator 0.3.0rc2, vibesys-k8s, 5 samples): 378-418 ops/s (mean
+391, CV 4.2%) and a p99 of 12.7-18.2 ms (mean 13.9, CV 17%); `objectives.toml`'s
+`relative_noise` follows them.
+
 ## What the accuracy check does (bench.py accuracy)
 
 `bench.py accuracy` runs `prepare` (the capacity envelope, then the data snapshot):

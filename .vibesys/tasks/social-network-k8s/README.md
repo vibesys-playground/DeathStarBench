@@ -29,6 +29,12 @@ median; three open-loop trials (evenly spaced arrivals, 10 s warmup, 60 s) offer
 `latency_ms.p99` their median. Validity: no error, every operation of the mix completed, the open
 loop sustains 95% of its rate.
 
+Baseline (the base on vibesys-evaluator 0.3.0rc2, vibesys-k8s, 6 samples): 2,941-3,384 ops/s
+(mean 3,165, CV 4.9%); a p99 of 4.3-5.0 ms in four samples (CV 6.3%), and 8.6 ms and 193 ms in
+two whose open-loop trials met host-wide stalls of 5-12 s that delayed every request (a stall
+longer than 0.6 s, 1% of the 60 s window, sets the p99). `objectives.toml`'s `relative_noise`
+follows them.
+
 ## The accuracy check (`bench.py accuracy`)
 
 vibesys-evaluator's accuracy run over the benchmark's system: it builds and deploys the candidate as a

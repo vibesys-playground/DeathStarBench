@@ -1,16 +1,16 @@
 [[objective]]
 name = "operations_per_second"
 direction = "max"
-# v2 base, fresh seeds per sample, closed loop 2 x 60 s: CV 4.7% over 3 samples
-# (j23); 2 x 20 s gave 5.7% (j22). Revisit once the base has more samples.
-relative_noise = 0.06
+# Base on vibesys-evaluator 0.3.0rc2, vibesys-k8s (a shared host), 5 samples of fresh seeds,
+# closed loop 2 x 60 s: 378.5, 380.2, 381.9, 396.0, 417.6 ops/s; mean 390.8, CV 4.2%.
+relative_noise = 0.05
 
 [[objective]]
 name = "latency_ms.p99"
 direction = "min"
-# v2 base, open loop 3 x 60 s at 70% of the sample's own throughput: CV 3.5%
-# (j22) and 15.2% (j23) over 3 samples each; pooled about 11%.
-relative_noise = 0.12
+# Same samples, open loop 3 x 60 s at 70% of the sample's own throughput: 12.7, 12.7, 13.0,
+# 13.1, 18.2 ms; mean 13.9, CV 17%.
+relative_noise = 0.17
 
 [pareto]
-relative_noise = 0.12
+relative_noise = 0.17
