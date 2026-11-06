@@ -40,8 +40,8 @@ not know the dataset's content. Writing the documents directly takes about
 
 ## Testing
 
-`go.mod` requires the vibesys-evaluator Go module at the release of the evaluator image the
-Dockerfile builds `FROM` (change both together; `tests/test_accuracy.py` checks they agree), so
+`go.mod` requires the vibesys-evaluator Go module at the release the Dockerfile's
+`VIBESYS_EVALUATOR_VERSION` names (change both together; `tests/test_accuracy.py` checks they agree), so
 `go test ./...` works anywhere with network access. The stream test pins the generator's request stream for two phases
 (`cmd/generator/testdata`); `SN_STREAM_RECORD=1` re-records it, which is a change of the task's
 requests. `internal/snspec` and `internal/snaccuracy` run the in-process fake application

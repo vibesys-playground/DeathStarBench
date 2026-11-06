@@ -59,16 +59,15 @@ class PinTest(unittest.TestCase):
     def test_the_image_and_the_go_module_pin_the_same_evaluator_release(self):
         dockerfile = (TASK_DIR / "Dockerfile").read_text()
         go_mod = (TASK_DIR / "evaluator" / "go.mod").read_text()
-        base = re.findall(r"^FROM ghcr\.io/uw-syfi/vibesys-evaluator-microservices:(\S+)@sha256:[0-9a-f]{64}$",
-                          dockerfile, re.M)
+        python = re.findall(r"^ARG VIBESYS_EVALUATOR_VERSION=(\S+)$", dockerfile, re.M)
         go = re.findall(r"github\.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go v(\S+)", go_mod)
-        self.assertEqual(len(base), 1, "the task image is FROM the evaluator's image, by tag and digest")
+        self.assertEqual(len(python), 1, "the Dockerfile pins the evaluator once")
         self.assertEqual(len(go), 1)
         # PEP 440 0.3.0rc2 is the Go module's semver 0.3.0-rc.2.
-        self.assertEqual(re.sub(r"rc(\d+)$", r"-rc.\1", base[0]), go[0])
-        # The image's last stage is the evaluator's; the task's programs go on top of it.
-        self.assertTrue(dockerfile[dockerfile.rindex("\nFROM "):].startswith(
-            "\nFROM ghcr.io/uw-syfi/vibesys-evaluator-microservices:"))
+        self.assertEqual(re.sub(r"rc(\d+)$", r"-rc.\1", python[0]), go[0])
+        # The task image (the last stage) installs that release from PyPI.
+        last = dockerfile[dockerfile.rindex("\nFROM "):]
+        self.assertIn('pip install --no-cache-dir "vibesys-evaluator==${VIBESYS_EVALUATOR_VERSION}"', last)
 
 
 if __name__ == "__main__":

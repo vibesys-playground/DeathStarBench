@@ -7,9 +7,9 @@ commit that makes it.
 
 Go module `vibesys/social-network-k8s-evaluator`. `go.mod` requires the
 vibesys-evaluator Go module (`github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go`:
-the workload SDK and the checker) at the release of the evaluator image the
-Dockerfile builds `FROM` (the same as the Python package and the loadgen the
-task image holds; `tests/test_accuracy.py` checks they agree).
+the workload SDK and the checker) at the release the Dockerfile's
+`VIBESYS_EVALUATOR_VERSION` names (the same as the Python package and the
+loadgen the task image holds; `tests/test_accuracy.py` checks they agree).
 
 Build (in the Dockerfile, `CGO_ENABLED=0`):
 
