@@ -15,24 +15,22 @@
 # `--opt target=data`): the data tier's own mongod, which writes the snapshot's files, and
 # hotel-data.
 
-# The one place the vibesys-evaluator release is pinned in this file: the Python package's
-# version (PyPI) and the Go SDK's tag (the same release, spelled as Go does). evaluator/go.mod
-# requires the same Go version; change all three together.
-ARG EVALUATOR_VERSION=0.2.0rc1
-ARG EVALUATOR_GO_VERSION=v0.2.0-rc.1
+# The one place the vibesys-evaluator release is pinned in this file (the Go module's tag; the
+# Python package's PyPI version is derived from it: v0.2.0-rc.1 is 0.2.0rc1). evaluator/go.mod
+# requires the same Go version; change both together.
+ARG VIBESYS_EVALUATOR_VERSION=v0.2.0-rc.1
 ARG ORACLE_VIBESYS_COMMIT=de037943cb6a8e6e73d00e8bc19fa53570558583
 ARG KUBECTL_VERSION=v1.34.0
 ARG KUBECTL_SHA256=cfda68cba5848bc3b6c6135ae2f20ba2c78de20059f68789c090166d6abc3e2c
 
 FROM golang:1.25.9-bookworm@sha256:298734aec230b5f3e8cee450ce6d7eccc39f1797ba548ee90d57e9803030c6c3 AS evaluator
-ARG EVALUATOR_VERSION
-ARG EVALUATOR_GO_VERSION
+ARG VIBESYS_EVALUATOR_VERSION
 ARG KUBECTL_VERSION
 ARG KUBECTL_SHA256
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath GOBIN=/out
 RUN go install \
-      "github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen/cmd/loadgen@${EVALUATOR_GO_VERSION}" \
-      "github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen/cmd/otelcapture@${EVALUATOR_GO_VERSION}"
+      "github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen/cmd/loadgen@${VIBESYS_EVALUATOR_VERSION}" \
+      "github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen/cmd/otelcapture@${VIBESYS_EVALUATOR_VERSION}"
 RUN curl -fsSL -o /out/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
  && echo "${KUBECTL_SHA256}  /out/kubectl" | sha256sum -c - \
  && chmod 0755 /out/kubectl
@@ -58,8 +56,9 @@ COPY --from=oracle /out/hotel-data /usr/local/bin/
 FROM moby/buildkit:v0.22.0@sha256:832fa7aa1eb3deb56fa62ae933bfa42dad9a83ff4824dbbaf173b49c722b59d0 AS buildkit
 
 FROM python:3.12.12-slim-bookworm@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c
-ARG EVALUATOR_VERSION
-RUN pip install --no-cache-dir "vibesys-evaluator==${EVALUATOR_VERSION}"
+ARG VIBESYS_EVALUATOR_VERSION
+RUN version="${VIBESYS_EVALUATOR_VERSION#v}" \
+ && pip install --no-cache-dir "vibesys-evaluator==$(echo "$version" | sed 's/-rc\./rc/')"
 COPY --from=evaluator /out/loadgen /out/otelcapture /out/kubectl /usr/local/bin/
 COPY --from=oracle /out/hotel-generator /out/hotel-correctness /out/podctl /out/hotel-data /usr/local/bin/
 COPY --from=buildkit /usr/bin/buildctl /usr/local/bin/buildctl

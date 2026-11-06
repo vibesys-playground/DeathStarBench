@@ -7,7 +7,7 @@ it.
 
 Go module `vibesys/social-network-k8s-evaluator`. `go.mod` requires the
 vibesys-evaluator Go SDK at the release the Dockerfile's
-`EVALUATOR_GO_VERSION` names (the same as the loadgen binary the task image holds).
+`VIBESYS_EVALUATOR_VERSION` names (the same as the loadgen binary the task image holds).
 
 Build (in the Dockerfile, `CGO_ENABLED=0`):
 

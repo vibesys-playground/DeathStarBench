@@ -40,7 +40,7 @@ not know the dataset's content. Writing the documents directly takes about
 ## Testing
 
 `go.mod` requires the vibesys-evaluator Go SDK at the release the Dockerfile's
-`EVALUATOR_GO_VERSION` names (change both together), so `go test ./...` works anywhere with network access. The phase and stream
+`VIBESYS_EVALUATOR_VERSION` names (change both together), so `go test ./...` works anywhere with network access. The phase and stream
 tests of `cmd/generator` build loadgen from that module (or use `$LOADGEN`); `-short` skips
 the phase tests. The stream test pins the generator's request stream for two
 phases (`cmd/generator/testdata`); `SN_STREAM_RECORD=1` re-records it, which is
