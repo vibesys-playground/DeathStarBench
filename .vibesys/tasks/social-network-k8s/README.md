@@ -11,7 +11,7 @@ candidate input: the CLI versions these files as the task.
 | `bench.py`, `dataset.py` | The benchmark on vibesys-evaluator: the system (`k8s.App`), the seed, the workload (`sn-generator`), the phases and the validity rules; the dataset is the Go dataset's seed and digest. |
 | `run.py` | The accuracy check: `check`, `sweep`, and `ctl` (the checker's restart and flush hook). |
 | `k8s/manifest.yaml` | The application: 24 Deployments, 24 Services, 1 ConfigMap (tracing). Flat, namespaced kinds only. |
-| `evaluator/` | Owned by the evaluator: dataset, seed, the oracle, the generator and the checker; `evaluator/INTERFACE.md` is the contract with `bench.py` and `run.py`. |
+| `evaluator/` | Owned by the evaluator: dataset, seed, the oracle, the generator and the checker (`cmd/oracle`, `internal/snspec`: the oracle on the vibesys-evaluator checker, see Accuracy oracle); `evaluator/INTERFACE.md` is the contract with `bench.py` and `run.py`. |
 | `tests/` | Unit tests of `bench.py`, `dataset.py` and `run.py` (`python -m unittest discover -s tests`, with vibesys-evaluator installed). |
 
 ## The benchmark (`bench.py benchmark`)
@@ -58,6 +58,44 @@ mix completed, the open loop sustains 95% of its rate.
    the manifest's `timeout_seconds` plus 10 minutes. The label keys are this task's own, and
    vibesys-evaluator sweeps the benchmark's namespaces by its own label, so no sweep touches
    another's namespaces. `run.py sweep` runs only the sweep.
+
+## Accuracy oracle on vibesys-evaluator's `check` (not wired yet)
+
+`evaluator/cmd/oracle` is the task's semantic oracle on the vibesys-evaluator Go checker
+(`go/check`, `sdk/vibesys-evaluator/docs/accuracy-checks.md`): `check.Main` over two
+`check.Spec`s from `internal/snspec`, whose verdicts are ANDed. It checks the same contract as
+`internal/oracle` (the check programs of `run.py check`, which stay the accuracy check until
+the accuracy command exists) over a captured history instead of a sequence of programs.
+
+- **`AuthorSpec`**, per author (`u:<id>`: composes, registration, follow edges that point at the
+  user, its user timeline, and every home read projected to the authors on its page; `n:<name>`
+  for username claims): visibility with the bound B = 1 s, edge uncertainty, mentions that
+  deliver regardless of edges, post identity learned at first sight, content, order and the
+  author's slice of the page.
+- **`ReaderSpec`**, per reader (`r:<reader>`): the page arithmetic across authors, which the author
+  view cannot see ("page starts too new", an empty page with posts that must be there). Every
+  compose is replicated into the partitions of the readers that could receive it.
+- **Faults**: `Fault` is nil in both. Every acknowledged write survives a restart or a flush, so
+  a post, edge or timeline entry lost across one shows as an entry that must be visible and is
+  missing. A lost response or 5xx is an unknown outcome (`EffectWindow` 10 s).
+- **Contract with the accuracy workload** (not written yet): each call's Info is the JSON of its
+  `oracle.Action` (what it sends) and its one step is the HTTP request of `oracle.Request`;
+  `snspec.FromOracleCall` builds that from an `oracle.Call`. Writes stay under about 12
+  operations in flight per author or reader, and under 1% unknown outcomes.
+- **Tests**: `go test ./internal/snspec` (crafted histories for every rule, and 15 runs of the
+  in-process fake application: correct with a synchronous or an asynchronous fan-out and with
+  timeouts, and injected bugs: stale beyond the bound, stale cache or replica, a missing,
+  phantom or misordered post, an unfollow ignored, posts lost on a restart, home timelines lost
+  on a flush, a partial follower cache, a shifted page; `-short` skips the runs).
+  `SN_ORACLE_CAPTURE=<spike's sn/runs/real1/hist> go test -v ./cmd/oracle` checks the real
+  capture offline (171,000 calls, 2 restarts and 2 flushes: PASS; with newest posts dropped from
+  five pages: FAIL). The oracle binary must not link `internal/snworkload` (loadgen's protobuf
+  files clash with the checker's); `go.mod` requires the Go SDK at a pseudo-version of vibesys
+  main until its release.
+- **The accuracy command** will be the evaluator's accuracy flow (deploy, fixed-rate phases of
+  the accuracy workload, restart and flush faults between them, capture to a history
+  directory) followed by `oracle --history DIR`; then `run.py check`, `cmd/checker` and
+  `internal/oracle`'s programs go away.
 
 ## Image and build
 

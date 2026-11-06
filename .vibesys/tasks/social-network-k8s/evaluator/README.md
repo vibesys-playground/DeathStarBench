@@ -11,6 +11,7 @@ generator and the accuracy checker for DeathStarBench Social Network.
 | `internal/timeline` | wire format and the page-window check |
 | `internal/oracle` | the contract as a state machine: `Step(state, call)`, bounded-staleness reads, the verifier of programs (calls, parallel groups, restarts, flushes), the check programs C1-C14 and their HTTP system |
 | `internal/snworkload`, `cmd/generator` | the benchmark's workload on the vibesys-evaluator Go SDK (built as `sn-generator`): request distributions, and checks by the oracle |
+| `internal/snspec`, `cmd/oracle` | the contract as two `check.Spec`s (per author, per reader) on vibesys-evaluator's checker, and `check.Main` over a captured history directory; not yet wired into `run.py` (see the task README, Accuracy oracle) |
 | `cmd/checker` | the accuracy check: runs the oracle's check programs against a deployment |
 | `internal/fakeapp` | in-process fake of the public API with injectable faults (tests) |
 

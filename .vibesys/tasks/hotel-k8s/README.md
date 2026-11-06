@@ -17,7 +17,7 @@ is a candidate input: the CLI versions these files as the task.
 | `k8s/manifest.yaml` | The task's part: the data tier's 11 Deployments (labelled `tier: data`) and 12 Services, the `frontend` Service and the services' 8 ConfigMaps. Each MongoDB pod's init container restores its database from the node's snapshot (`@DATA_SNAPSHOT_VERSION@`, which `snapshot.render` replaces). |
 | `k8s/app.yaml` | The reference application tier: 8 Deployments (2 pods, 1 CPU each; 8 GiB in all: geo 1280 MiB, recommendation 1 GiB, user and frontend 384 MiB, the others 256 MiB, each with `GOMEMLIMIT` a little under its limit) and the 7 gRPC Services, as the base's `hotelReservation/deploy/app.yaml` has them; used for a candidate without that file (one made before the envelope). |
 | `k8s/deployed.yaml` | Not committed: the composed manifest (`k8s/manifest.yaml` and the candidate's tier) that bench.py writes before vibesys-evaluator reads it (`k8s.App(manifest=)` names one file of the task directory). `benchmark` first re-runs bench.py from a writable copy of the task directory, where it writes this file. |
-| `evaluator/` | Go module of the benchmark's workload and the accuracy check. `cmd/generator` (`internal/hotelworkload`) is the benchmark's request generator and its checks, on the vibesys-evaluator Go SDK (`loadgen/workload`) over the oracle's model; its `TestTheStream` pins its request stream (`testdata/stream.json`; `-args -update` re-records it and phase2's history). `internal/dataset` generates the data from dataset.py's dataset file (`--dataset` or `$HOTEL_DATASET`): a compact core per hotel in memory, a hotel's full record and its nights regenerated from its own random stream when asked for; and draws the oracle's own write values (`additions.go`, `vocabulary.go`). `internal/snapshot` and `cmd/hotel-data` build, version and verify the MongoDB snapshot (see Data snapshot); `TestBuildRestoreVerify` runs a real build, restore and verify when `$HOTEL_MONGOD` names a mongod 5.0. `internal/appsupport/hotel` holds `Reference`, the pinned application's read answers over the dataset (pinned against the real library by `testdata/geoindex_golden.json`), plus topology and preflight probes. `cmd/hotel-correctness` and `internal/accuracyapps/hotel` are the semantic oracle. `cmd/podctl` (`internal/podctl`) restarts and waits for pods through the Kubernetes API from inside the namespace. Its tests run on a 20,000-hotel dataset of the same shape (`dataset.TestSpec`) unless `$HOTEL_DATASET` names one; `TestTheStream` needs the task's own (`python dataset.py /tmp/dataset.json; HOTEL_DATASET=/tmp/dataset.json go test ./cmd/generator`). `go.mod` requires the vibesys-evaluator Go SDK at the same release (change the Dockerfile's `VIBESYS_EVALUATOR_VERSION` and this together) and replaces the servicebench modules (the oracle's) by the image's clone at `/src`; a local build points those at a checkout of `ORACLE_VIBESYS_COMMIT` with a `go.work`. |
+| `evaluator/` | Go module of the benchmark's workload and the accuracy check. `cmd/generator` (`internal/hotelworkload`) is the benchmark's request generator and its checks, on the vibesys-evaluator Go SDK (`loadgen/workload`) over the oracle's model; its `TestTheStream` pins its request stream (`testdata/stream.json`; `-args -update` re-records it and phase2's history). `internal/dataset` generates the data from dataset.py's dataset file (`--dataset` or `$HOTEL_DATASET`): a compact core per hotel in memory, a hotel's full record and its nights regenerated from its own random stream when asked for; and draws the oracle's own write values (`additions.go`, `vocabulary.go`). `internal/snapshot` and `cmd/hotel-data` build, version and verify the MongoDB snapshot (see Data snapshot); `TestBuildRestoreVerify` runs a real build, restore and verify when `$HOTEL_MONGOD` names a mongod 5.0. `internal/appsupport/hotel` holds `Reference`, the pinned application's read answers over the dataset (pinned against the real library by `testdata/geoindex_golden.json`), plus topology and preflight probes. `cmd/hotel-correctness` and `internal/accuracyapps/hotel` are the semantic oracle of `run.py check`; `cmd/oracle` and `internal/hotelspec` are its successor on the vibesys-evaluator checker (see Accuracy oracle). `cmd/podctl` (`internal/podctl`) restarts and waits for pods through the Kubernetes API from inside the namespace. Its tests run on a 20,000-hotel dataset of the same shape (`dataset.TestSpec`) unless `$HOTEL_DATASET` names one; `TestTheStream` needs the task's own (`python dataset.py /tmp/dataset.json; HOTEL_DATASET=/tmp/dataset.json go test ./cmd/generator`). `go.mod` requires the vibesys-evaluator Go SDK at the same release (change the Dockerfile's `VIBESYS_EVALUATOR_VERSION` and this together) and replaces the servicebench modules (the oracle's) by the image's clone at `/src`; a local build points those at a checkout of `ORACLE_VIBESYS_COMMIT` with a `go.work`. |
 | `workload/oracle.toml` | The oracle's workload: targets, timeout, `strict_linearizable_capacity`. |
 
 ## What the benchmark does (bench.py, one sample)
@@ -79,6 +79,49 @@ open loop below 95% of its rate. The sample seed is drawn per sample and recorde
    namespaces older than the larger of the manifest's `timeout_seconds` plus 10 minutes.
    `run.py sweep` runs only that sweep. (The benchmark's namespaces are vibesys-evaluator's,
    which sweeps its own the same way.)
+
+## Accuracy oracle on vibesys-evaluator's `check` (not wired yet)
+
+`evaluator/cmd/oracle` is the task's semantic oracle on the vibesys-evaluator Go checker
+(`go/check`, `sdk/vibesys-evaluator/docs/accuracy-checks.md`): `check.Main` over one
+`check.Spec`, built by `internal/hotelspec` (`hotelspec.Spec(catalog)`). It replaces
+`hotel-correctness` (the servicebench oracle of `run.py check`, which stays the accuracy check
+until the accuracy command exists).
+
+- **Partition key**: the hotel (`h:<id>`). A search (up to 5 hotels) and a recommendation are
+  projected into one piece per hotel they could return, each checked in its hotel's history (no
+  cross-hotel snapshot is promised). Logins, GeoJSON fields and the hotel sets of
+  recommendations depend on no state and are checked while projecting (a `Violation`).
+- **Model** (`Project`, `Init`, `Step`, `EffectWindow` 10 s): reservations and capacity writes
+  are strict; a reservation takes the rooms of its night or none, a failed login still reserves
+  (the pinned frontend), a capacity below the fullest night is 409. Everything search,
+  recommendations and `/rates` show is under the 1 s bound, strictly more than 1 s: profile
+  fields and prices are `check.Window`, each night's rooms a `check.Counter`, capacity a
+  `check.Register`, nights a `check.PMap`. A lost response or 5xx is an unknown outcome.
+- **Faults**: `Spec.Fault` is nil. A restart of the application tier or a memcached flush
+  changes no state, since an acknowledged write is durable (MongoDB holds it, the caches are
+  rebuilt from it): a reservation, profile or rate lost across a fault shows up as a later
+  answer the model cannot reach. With a nil `Fault` the check does not copy faults into
+  partitions.
+- **Contract with the accuracy workload** (not written yet; `internal/hotelspec/info.go` lists
+  each operation's Info and HTTP step): reservations stay at **one night** (the base gives a
+  multi-night stay's rooms back night by night, so a stay is not atomic to observers); a
+  **capacity write must not overlap a reservation of the same hotel** (the base orders them only
+  when they do not overlap; the benchmark's `Exclusive` key, which goes away, did that); at most
+  about 12 operations in flight on one hotel (`MaxInFlight` in the report); a response lost or 5xx
+  share under 1% (`--max-lost-share`).
+- **Tests**: `go test ./internal/hotelspec` (synthetic histories from a simulated application:
+  correct runs pass; an overbooking race, reservations lost after a restart, availability stale
+  beyond 1 s, a search that shows a full hotel, profile writes and reservations lost by a
+  flush fail; crafted edges: the bound, a failed login, unknown outcomes, faults, violations).
+  `HOTEL_ORACLE_CAPTURES=<harness/runs of the spike> go test -v ./cmd/oracle` checks the real
+  captures offline (base1 and base2 must pass, mutant1 must fail; about 2.5 GB, 10-40 s each).
+  The module's `go.mod` still replaces the servicebench modules by `/src`, so build and test
+  with a `go.work` as above. The Go SDK is a pseudo-version of vibesys main until its release.
+- **The accuracy command** will be the evaluator's accuracy flow (deploy, fixed-rate phases of
+  the accuracy workload, restart and flush faults between them, capture to a history
+  directory) followed by `oracle --history DIR`; then `run.py check`, `hotel-correctness` and
+  the oracle Docker stage go away.
 
 ## Restart hooks
 
