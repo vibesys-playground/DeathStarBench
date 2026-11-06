@@ -1,5 +1,5 @@
 // Command accuracy-generator is the social-network-k8s accuracy check's request generator: the
-// workload of internal/snaccuracy on the vibesys-evaluator Go SDK. accuracy.py names it
+// workload of internal/snaccuracy on the vibesys-evaluator Go SDK. bench.py names it
 // (sn-accuracy-generator); the evaluator's accuracy run runs it under loadgen with every answer
 // captured, for the oracle (cmd/oracle).
 package main

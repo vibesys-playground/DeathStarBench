@@ -1,13 +1,15 @@
-"""social-network-k8s benchmark: DeathStarBench Social Network on Kubernetes, on vibesys-evaluator.
+"""social-network-k8s benchmark and accuracy check: DeathStarBench Social Network on Kubernetes, on vibesys-evaluator.
 
     python /task/bench.py benchmark --project-root ROOT --vs-output PATH   (one sample)
+    python /task/bench.py accuracy --project-root ROOT                     (exit 0 PASS, 1 FAIL, 2 UNKNOWN)
 
 The five parts: (1) the system under test, (2) the initial data (seed),
-(3) the workload, (4) the benchmark function, (5) the validity rules. The
-data is dataset.py's seed of the Go dataset (evaluator/internal/dataset). The
-workload (operations and request distributions) is the Go generator of
-evaluator/cmd/generator. A benchmark only measures: whether the answers are
-right is the accuracy check's (accuracy.py, on the same system).
+(3) the workload, (4) the benchmark function, (5) the validity rules; and
+(6) the accuracy check. The data is dataset.py's seed of the Go dataset
+(evaluator/internal/dataset). The workloads (operations and request
+distributions) are the Go generators of evaluator/cmd. A benchmark only
+measures: whether the answers are right is the accuracy check's, on the same
+system.
 """
 
 from __future__ import annotations
@@ -77,6 +79,33 @@ def seed(data: ds.Dataset) -> None:
 # A user id far from the dataset's, so the probes leave its caches alone.
 PROBE_USER = "1999999999"
 
+# The application tier (tier=app in k8s/manifest.yaml): 11 C++ services and nginx-thrift, which
+# the accuracy check's faults restart.
+APPLICATION = (
+    "nginx-thrift",
+    "compose-post-service",
+    "home-timeline-service",
+    "media-service",
+    "post-storage-service",
+    "social-graph-service",
+    "text-service",
+    "unique-id-service",
+    "url-shorten-service",
+    "user-mention-service",
+    "user-service",
+    "user-timeline-service",
+)
+# The cache tiers, which the accuracy check's faults empty in place. home-timeline-redis is a
+# store, not a cache (the pinned application keeps home timelines only there, without
+# persistence), and MongoDB holds the data: neither is ever restarted or flushed.
+CACHES = {
+    "post-storage-memcached": "memcached",
+    "url-shorten-memcached": "memcached",
+    "user-memcached": "memcached",
+    "social-graph-redis": "redis",
+    "user-timeline-redis": "redis",
+}
+
 SYSTEM = k8s.App(
     name="social-network-k8s",
     manifest="k8s/manifest.yaml",  # ${NAMESPACE} and ${SOCIAL_NETWORK_IMAGE} are substituted
@@ -92,6 +121,8 @@ SYSTEM = k8s.App(
         get("/wrk2-api/user-timeline/read", query={"user_id": PROBE_USER, "start": "0", "stop": "1"}),
         get("/wrk2-api/home-timeline/read", query={"user_id": PROBE_USER, "start": "0", "stop": "1"}),
     ],
+    restartable=APPLICATION,
+    caches=CACHES,
 )
 
 
@@ -100,7 +131,7 @@ SYSTEM = k8s.App(
 # read-your-write read, 1% follow and unfollow) and how each request is drawn are Go:
 # evaluator/internal/snworkload on the vibesys-evaluator Go SDK. The task image builds it as
 # sn-generator (evaluator/cmd/generator); each phase pod runs it under loadgen to generate the
-# request stream. Nothing checks the answers here (accuracy.py does, with its own workload).
+# request stream. Nothing checks the answers here (the accuracy check does, with its own workload).
 
 WORKLOAD = Generator(["sn-generator"])  # on the task image's PATH
 
@@ -147,6 +178,45 @@ METRICS = {
 VALIDITY = vse.Validity(max_error_rate=0.0, min_sustained_ratio=0.95, min_ops_per_operation=1)
 
 
+# ------------------------------------------------------- (6) accuracy check
+# vibesys-evaluator's accuracy run (its docs/spec.md, "Accuracy run") over the system above. It
+# runs ACCURACY_PHASES open-loop phases of the accuracy workload (evaluator/internal/snaccuracy,
+# built as sn-accuracy-generator) at a fixed ACCURACY_RATE with every answer captured, applies
+# FAULTS between them, tears the system down and runs the oracle (evaluator/cmd/oracle, built as
+# sn-oracle: internal/snspec's author and reader specs on vibesys-evaluator's checker, ANDed) on
+# the history. The report, the failures' timelines and the history go to
+# /vibesys/artifacts/accuracy. No phase is a measurement: VALIDITY does not apply, and the
+# workload's invalid requests, which must be refused, are not errors.
+#
+# The load: a fixed, modest rate (the base serves well over 1,500 operations/s), so that the
+# answers are judged, not the capacity; lost answers stay near zero and few operations of one
+# author or reader are in flight at once (the report's MaxInFlight). Four phases of 30 s: about
+# 36,000 operations, most of them on the 40 hot users.
+ACCURACY_PHASES, ACCURACY_RATE, ACCURACY_SECS, ACCURACY_WARMUP = 4, 300, 30, 2
+
+ACCURACY_WORKLOAD = Generator(["sn-accuracy-generator"])  # on the task image's PATH
+ORACLE = ["sn-oracle"]
+
+# The faults are what OBJECTIVE.md's durability rule names and the oracle's model says change
+# nothing (snspec's Spec.Fault is nil: an acknowledged post, follow or registration survives a
+# restart of any stateless pod and a flush of any cache tier), so a candidate that keeps an
+# acknowledged write only in a pod or in a cache fails:
+# - after phase 0, one pod of each application Deployment, one after the other, each waited for
+#   until the application serves again (the other replica serves meanwhile);
+# - after phase 1, the cache tiers emptied in place: memcached's `flush_all`, redis's `FLUSHALL`;
+# - after phase 2, every pod of each application Deployment at once, one Deployment after the
+#   other.
+FAULTS = (
+    [ms.Fault.restart(name, after=0) for name in APPLICATION]
+    + [ms.Fault.flush(cache, after=1) for cache in CACHES]
+    + [ms.Fault.restart_all(name, after=2) for name in APPLICATION]
+)
+ACCURACY = ms.Accuracy(
+    phases=ACCURACY_PHASES, rate=ACCURACY_RATE, secs=ACCURACY_SECS, warmup=ACCURACY_WARMUP,
+    workload=ACCURACY_WORKLOAD, faults=FAULTS, oracle=ORACLE,
+)
+
+
 if __name__ == "__main__":
     ms.main(
         dataset=ds.generate,
@@ -155,4 +225,5 @@ if __name__ == "__main__":
         benchmark=benchmark,
         metrics=METRICS,
         validity=VALIDITY,
+        accuracy=ACCURACY,
     )

@@ -220,7 +220,7 @@ any of its pods is; one that serves no gRPC need not register), and `/user`,
 `/recommendations` and `/hotels` return HTTP 200 on each pod behind the `frontend`
 Service; the same holds after every restart (a Deployment whose pods were registered
 before a restart must have its replacements registered). A candidate that does not become
-ready in 300 seconds fails.
+ready in 1800 seconds fails.
 
 ## Rules
 

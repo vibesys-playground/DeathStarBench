@@ -7,12 +7,11 @@ candidate input: the CLI versions these files as the task.
 | Path | What |
 | --- | --- |
 | `vibesys.input.toml`, `objectives.toml` | Manifest and the two Pareto objectives. |
-| `Dockerfile` | The task image every job (and the pods of a benchmark sample or an accuracy check) runs in: vibesys-evaluator (the Python package from PyPI, whose platform wheel bundles the core, `loadgen` and `otelcapture`, the latter two linked onto PATH for the probe pods; release 0.3.0rc1, the Dockerfile's `VIBESYS_EVALUATOR_VERSION` sets it), kubectl 1.34 and buildctl, and `seed`, `sn-generator`, `sn-accuracy-generator` and `sn-oracle` built from `evaluator/` against the vibesys-evaluator Go module `evaluator/go.mod` requires at the same release. Base images are pinned by digest. |
-| `bench.py`, `dataset.py` | The benchmark on vibesys-evaluator: the system (`k8s.App`), the seed, the workload (`sn-generator`), the phases and the validity rules; the dataset is the Go dataset's seed and digest. |
-| `accuracy.py` | The accuracy check on vibesys-evaluator's accuracy run: bench.py's system, the accuracy workload (`sn-accuracy-generator`), the fault schedule and the oracle (`sn-oracle`). |
+| `Dockerfile` | The task image every job (and the pods of a benchmark sample or an accuracy check) runs in: `FROM` vibesys-evaluator's microservices image at release 0.3.0rc2 (`ghcr.io/uw-syfi/vibesys-evaluator-microservices`: the Python package from PyPI with its bundled core, `loadgen` and `otelcapture` on the PATH, kubectl 1.34 and buildctl), and `seed`, `sn-generator`, `sn-accuracy-generator` and `sn-oracle` built from `evaluator/` against the vibesys-evaluator Go module that `evaluator/go.mod` requires at the same release (v0.3.0-rc.2; `tests/test_accuracy.py` checks they agree). Base images are pinned by digest. |
+| `bench.py`, `dataset.py` | The benchmark and the accuracy check on vibesys-evaluator: the system (`k8s.App`, with the application Deployments as `restartable` and the cache tiers as `caches`), the seed, the workload (`sn-generator`), the phases and the validity rules; the accuracy check (`ACCURACY`): its own workload (`Accuracy(workload=Generator(["sn-accuracy-generator"]))`), the fault schedule and the oracle (`sn-oracle`). The dataset is the Go dataset's seed and digest. |
 | `k8s/manifest.yaml` | The application: 24 Deployments, 24 Services, 1 ConfigMap (tracing). Flat, namespaced kinds only. |
-| `evaluator/` | Owned by the evaluator: dataset, seed, the benchmark's workload (`internal/snworkload`), the accuracy workload (`internal/snaccuracy`) and the oracle (`cmd/oracle`, `internal/snspec`); `evaluator/INTERFACE.md` is the contract with `bench.py` and `accuracy.py`. |
-| `tests/` | Unit tests of `bench.py`, `dataset.py` and `accuracy.py` (`python -m unittest discover -s tests`, with vibesys-evaluator installed). |
+| `evaluator/` | Owned by the evaluator: dataset, seed, the benchmark's workload (`internal/snworkload`), the accuracy workload (`internal/snaccuracy`) and the oracle (`cmd/oracle`, `internal/snspec`); `evaluator/INTERFACE.md` is the contract with `bench.py`. |
+| `tests/` | Unit tests of `bench.py` (the benchmark and the accuracy check), `dataset.py` and the evaluator pin (`python -m unittest discover -s tests`, with vibesys-evaluator installed). |
 
 ## The benchmark (`bench.py benchmark`)
 
@@ -30,9 +29,9 @@ median; three open-loop trials (evenly spaced arrivals, 10 s warmup, 60 s) offer
 `latency_ms.p99` their median. Validity: no error, every operation of the mix completed, the open
 loop sustains 95% of its rate.
 
-## The accuracy check (`accuracy.py accuracy`)
+## The accuracy check (`bench.py accuracy`)
 
-vibesys-evaluator's accuracy run over bench.py's system: it builds and deploys the candidate as a
+vibesys-evaluator's accuracy run over the benchmark's system: it builds and deploys the candidate as a
 benchmark sample does (data tier, seed, application, readiness probes), then runs four open-loop
 phases of `sn-accuracy-generator` (300 operations/s, 2 s warmup, 30 s; about 36,000 operations)
 with every answer captured, applies the faults between them, tears the namespace down and runs
@@ -44,8 +43,8 @@ Faults (`Fault` is nil in the oracle: none of them may change what a read return
 
 - after phase 0, one pod of each of the twelve application Deployments, one after the other,
   each waited for until the application serves again;
-- after phase 1, the cache tiers emptied in place: `flush_all` on the three memcached (bash's
-  `/dev/tcp`), `FLUSHALL` on `social-graph-redis` and `user-timeline-redis` (`redis-cli`);
+- after phase 1, the cache tiers emptied in place (`Fault.flush`, in every pod): `flush_all` on
+  the three memcached, `FLUSHALL` on `social-graph-redis` and `user-timeline-redis`;
 - after phase 2, every pod of each application Deployment at once, one Deployment after the
   other.
 

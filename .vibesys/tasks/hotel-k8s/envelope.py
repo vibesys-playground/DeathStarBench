@@ -5,7 +5,7 @@ Services, the services' ConfigMaps and the frontend Service). The candidate owns
 application tier, `hotelReservation/deploy/app.yaml`: how the eight services' code is
 grouped into Deployments, their replicas and the split of the envelope among them, and the
 Services its pods call each other through. bench.py's `prepare` calls `load()` before the
-benchmark or the accuracy check (accuracy.py) builds or applies anything; a violation raises
+benchmark or the accuracy check (bench.py accuracy) builds or applies anything; a violation raises
 EnvelopeError, whose message names the file, the object and the key of every violation.
 
 The rules (OBJECTIVE.md, Resources):

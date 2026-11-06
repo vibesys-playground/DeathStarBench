@@ -9,12 +9,12 @@ needs = ["kubernetes"]
 
 # Both commands run the trusted task code baked into the task image at /task, on
 # vibesys-evaluator; they read KUBECONFIG, VIBESYS_K8S_REGISTRY and VIBESYS_K8S_BUILDER from
-# the environment. The check is accuracy.py (the evaluator's accuracy run: fixed-rate phases
-# with restarts and cache flushes between them, judged by the task's oracle); the benchmark is
-# bench.py (one sample per run). A cold build of the C++ services takes most of the first
+# the environment. Both are bench.py's: the accuracy check (the evaluator's accuracy run:
+# fixed-rate phases with restarts and cache flushes between them, judged by the task's oracle)
+# and the benchmark (one sample per run). A cold build of the C++ services takes most of the first
 # job's time.
 [accuracy]
-command = ["python", "/task/accuracy.py", "accuracy", "--project-root", "${PROJECT_ROOT}"]
+command = ["python", "/task/bench.py", "accuracy", "--project-root", "${PROJECT_ROOT}"]
 timeout_seconds = 3600
 
 [benchmark]

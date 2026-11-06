@@ -1,6 +1,6 @@
 // Command accuracy-generator is the hotel-k8s accuracy check's request generator: the workload of
 // internal/hotelaccuracy on the vibesys-evaluator Go SDK. The accuracy run's phase pods run it
-// under loadgen as `hotel-accuracy-generator generate ...`; accuracy.py names it.
+// under loadgen as `hotel-accuracy-generator generate ...`; bench.py names it.
 package main
 
 import (

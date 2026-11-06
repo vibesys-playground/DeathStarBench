@@ -3,7 +3,7 @@ module vibesys/social-network-k8s-evaluator
 go 1.25.0
 
 require (
-	github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go v0.3.0-rc.1
+	github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go v0.3.0-rc.2
 	go.mongodb.org/mongo-driver v1.12.2
 	google.golang.org/protobuf v1.36.12
 )

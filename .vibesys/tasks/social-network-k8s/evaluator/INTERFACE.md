@@ -1,15 +1,15 @@
-# social-network-k8s evaluator: interface for bench.py and accuracy.py
+# social-network-k8s evaluator: interface for bench.py
 
 This file is the contract between the evaluator module (this directory) and
-the task's trusted code (`bench.py`, `accuracy.py`, the Dockerfile and the
+the task's trusted code (`bench.py`, the Dockerfile and the
 manifest). It is owned by the evaluator; any change to it is announced in the
 commit that makes it.
 
 Go module `vibesys/social-network-k8s-evaluator`. `go.mod` requires the
 vibesys-evaluator Go module (`github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go`:
-the workload SDK and the checker) at the release the Dockerfile's
-`VIBESYS_EVALUATOR_VERSION` names (the same as the Python package and the
-loadgen the task image holds).
+the workload SDK and the checker) at the release of the evaluator image the
+Dockerfile builds `FROM` (the same as the Python package and the loadgen the
+task image holds; `tests/test_accuracy.py` checks they agree).
 
 Build (in the Dockerfile, `CGO_ENABLED=0`):
 
@@ -22,7 +22,7 @@ All four are static binaries without runtime files; the dataset is generated
 in-process from the dataset seed. They are on the task image's `PATH`: the
 seed Job runs `seed`, the benchmark's phase pods run `sn-generator`, the
 accuracy run's phase pods `sn-accuracy-generator`, and the accuracy run runs
-`sn-oracle` on the captured history where `accuracy.py` runs.
+`sn-oracle` on the captured history where `bench.py accuracy` runs.
 
 ## Application topology the evaluator assumes
 

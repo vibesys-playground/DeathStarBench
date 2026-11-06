@@ -14,7 +14,7 @@ the job that started it) on the data image (the task Dockerfile's `data` stage: 
 tier's mongod and the hotel-data command). The Job builds what the snapshot lacks (the first
 time a version is asked for: about 25 minutes for the task's dataset, see README.md) and
 otherwise only checks it and records its use; concurrent Jobs serialize on the snapshot's
-lock. bench.py's `prepare` calls it before a benchmark sample and before accuracy.py's check;
+lock. bench.py's `prepare` calls it before a benchmark sample and before an accuracy check;
 `python snapshot.py ensure` (in the task image, with the cluster's environment) only makes the
 snapshot exist, for example on a new cluster before its first job.
 """

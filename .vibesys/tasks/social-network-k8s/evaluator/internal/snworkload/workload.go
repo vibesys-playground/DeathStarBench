@@ -1,8 +1,8 @@
 // Package snworkload is the social-network-k8s benchmark's workload on the vibesys-evaluator Go
 // SDK: the operations of the mix with their weights and how each request is drawn. cmd/generator
 // runs it as the generator that loadgen reads the request stream from (bench.py names it). A
-// benchmark only measures: whether the answers are right is the accuracy check's (accuracy.py,
-// with its own workload in internal/snaccuracy and the oracle in internal/snspec).
+// benchmark only measures: whether the answers are right is the accuracy check's (bench.py
+// accuracy, with its own workload in internal/snaccuracy and the oracle in internal/snspec).
 //
 // Operations (weights 500/400/100/5/5), each drawn from one 64-bit word of the operation's own
 // stream, as the earlier servicebench adapter drew them from its sample word:

@@ -1,7 +1,7 @@
 // Package hotelaccuracy is the hotel-k8s accuracy check's workload on the vibesys-evaluator Go
 // SDK: requests that contend on a few hotels, so that the oracle (internal/hotelspec) sees
 // reservations race for the last rooms, reads follow writes within the 1 s bound, and the state
-// outlives the faults between phases. cmd/accuracy-generator runs it (accuracy.py names it); the
+// outlives the faults between phases. cmd/accuracy-generator runs it (bench.py names it); the
 // accuracy run captures every answer and the oracle judges the history.
 //
 // Each request's Info is the oracle's contract (hotelspec's info.go), one HTTP step each:

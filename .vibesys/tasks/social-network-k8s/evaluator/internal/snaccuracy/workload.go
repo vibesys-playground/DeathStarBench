@@ -1,6 +1,6 @@
 // Package snaccuracy is the social-network-k8s accuracy check's workload on the vibesys-evaluator
-// Go SDK: what accuracy.py's run sends, at a fixed rate, for the oracle (internal/snspec) to
-// judge. cmd/accuracy-generator runs it (sn-accuracy-generator).
+// Go SDK: what the accuracy run (bench.py accuracy) sends, at a fixed rate, for the oracle
+// (internal/snspec) to judge. cmd/accuracy-generator runs it (sn-accuracy-generator).
 //
 // The contract with the oracle: every operation is one snapi.Action, its Info is the action
 // (its JSON) and its one step is the action's HTTP request (snapi.Request). Info says what was

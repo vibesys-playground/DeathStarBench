@@ -173,7 +173,7 @@ func run(t *testing.T, options fakeapp.Options, phases, perPhase int) *check.His
 		if phase < phases-1 {
 			f := check.Fault{Kind: "restart", Target: "home-timeline-service", Start: time.Now().UnixNano(), AfterPhase: phase}
 			if phase%2 == 1 {
-				f.Kind, f.Target = "exec", "social-graph-redis"
+				f.Kind, f.Target = "flush", "social-graph-redis"
 				app.Flush(f.Target)
 			} else {
 				app.Restart(f.Target)

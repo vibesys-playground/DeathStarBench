@@ -1,8 +1,8 @@
 // Package hotelworkload is the hotel-k8s benchmark's workload on the vibesys-evaluator Go SDK:
 // the operations of the mix with their weights and how each request is drawn. cmd/generator runs
 // it as the generator that loadgen reads the request stream from (bench.py names it). A benchmark
-// only measures: whether the answers are right is the accuracy check's (accuracy.py, with its own
-// workload in internal/hotelaccuracy and the oracle in internal/hotelspec).
+// only measures: whether the answers are right is the accuracy check's (bench.py accuracy, with
+// its own workload in internal/hotelaccuracy and the oracle in internal/hotelspec).
 //
 // Request distributions (each draw from the operation's own stream): locations by city
 // popularity (Zipf, s = 1) with normal offsets of the city's hotel spread, written with 5
