@@ -10,12 +10,12 @@
 # Job runs it from this image). Nothing writes into /task.
 
 # The one place the vibesys-evaluator release is pinned in this file: the PyPI version of the
-# package (0.3.0rc2; its platform wheel bundles the core, loadgen and otelcapture). evaluator/go.mod
-# requires the Go SDK at the same release, v0.3.0-rc.2 (tests/test_accuracy.py checks they
+# package (0.3.0rc3; its platform wheel bundles the core, loadgen and otelcapture). evaluator/go.mod
+# requires the Go SDK at the same release, v0.3.0-rc.3 (tests/test_accuracy.py checks they
 # agree). The evaluator's own image (ghcr.io/uw-syfi/vibesys-evaluator-microservices) holds the
 # same; it is not the base here because it is private, and the in-cluster rebuild of this image
 # pulls without credentials.
-ARG VIBESYS_EVALUATOR_VERSION=0.3.0rc2
+ARG VIBESYS_EVALUATOR_VERSION=0.3.0rc3
 ARG KUBECTL_VERSION=v1.34.0
 ARG KUBECTL_SHA256=cfda68cba5848bc3b6c6135ae2f20ba2c78de20059f68789c090166d6abc3e2c
 

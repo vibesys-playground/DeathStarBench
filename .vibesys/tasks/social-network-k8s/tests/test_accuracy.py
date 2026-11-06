@@ -63,7 +63,7 @@ class PinTest(unittest.TestCase):
         go = re.findall(r"github\.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go v(\S+)", go_mod)
         self.assertEqual(len(python), 1, "the Dockerfile pins the evaluator once")
         self.assertEqual(len(go), 1)
-        # PEP 440 0.3.0rc2 is the Go module's semver 0.3.0-rc.2.
+        # PEP 440 0.3.0rc3 is the Go module's semver 0.3.0-rc.3.
         self.assertEqual(re.sub(r"rc(\d+)$", r"-rc.\1", python[0]), go[0])
         # The task image (the last stage) installs that release from PyPI.
         last = dockerfile[dockerfile.rindex("\nFROM "):]
