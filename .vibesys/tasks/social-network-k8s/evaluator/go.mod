@@ -3,7 +3,7 @@ module vibesys/social-network-k8s-evaluator
 go 1.25.0
 
 require (
-	github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen v0.0.0
+	github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen v0.1.0-rc.2.0.20261106013004-5b13578e0d29
 	go.mongodb.org/mongo-driver v1.12.2
 	google.golang.org/protobuf v1.36.12
 )
@@ -21,9 +21,3 @@ require (
 	golang.org/x/sync v0.15.0 // indirect
 	golang.org/x/text v0.26.0 // indirect
 )
-
-// The vibesys-evaluator Go SDK (the generator's), from the clone of the vibesys commit whose
-// loadgen the task image holds (the Dockerfile's VIBESYS_COMMIT): one pin for both. The
-// Dockerfile clones that commit and builds against its sources, so the build needs no
-// published module version.
-replace github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen => /vse/sdk/vibesys-evaluator/loadgen

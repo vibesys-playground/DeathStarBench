@@ -331,7 +331,7 @@ class LoadTest(unittest.TestCase):
                 envelope.load(root)
 
     def test_composed_manifest_renders_with_the_application_after_the_seed(self):
-        from vibesys_evaluator.deploy._k8s import _manifest  # the package's own renderer
+        from vibesys_evaluator.microservices._k8s import _manifest  # the package's own renderer (not public API)
 
         app = envelope.validate(
             (TASK_DIR / "tests" / "testdata" / "regrouped.yaml").read_text(), source="r", task_text=TASK_TEXT

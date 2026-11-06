@@ -22,8 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import dataset as ds  # noqa: E402
 import vibesys_evaluator as vse  # noqa: E402
-from vibesys_evaluator.deploy import k8s  # noqa: E402
-from vibesys_evaluator.service import Generator, get  # noqa: E402
+from vibesys_evaluator import microservices as ms  # noqa: E402
+from vibesys_evaluator.microservices import Generator, get, k8s  # noqa: E402
 
 # ---------------------------------------------------------------- (2) seed
 
@@ -114,7 +114,7 @@ OPEN_TRIALS, OPEN_SECS, OPEN_WARMUP = 3, 60, 10
 OPEN_LOOP_LOAD_FRACTION = 0.7
 
 
-def benchmark(run: vse.Run) -> None:
+def benchmark(run: ms.Run) -> None:
     """Capacity in a closed loop, then the p99 latency at 70% of it in an open loop.
 
     Two closed-loop trials (32 clients, 10 s warmup, 20 s): the throughput is
@@ -149,7 +149,7 @@ VALIDITY = vse.Validity(max_error_rate=0.0, min_sustained_ratio=0.95, min_ops_pe
 
 
 if __name__ == "__main__":
-    vse.main(
+    ms.main(
         dataset=ds.generate,
         system=SYSTEM,
         workload=WORKLOAD,

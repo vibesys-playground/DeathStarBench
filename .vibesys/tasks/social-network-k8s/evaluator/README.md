@@ -39,16 +39,11 @@ not know the dataset's content. Writing the documents directly takes about
 
 ## Testing
 
-`go.mod` replaces the vibesys-evaluator Go SDK by `/vse/sdk/vibesys-evaluator/loadgen`
-(the Dockerfile copies the pinned commit's SDK there). Locally, extract that
-directory of the Dockerfile's `VIBESYS_COMMIT` and point a `go.work` at it:
-
-    go 1.25.0
-    use <this directory>
-    replace github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen => <extract>/sdk/vibesys-evaluator/loadgen
-
-then `GOWORK=<that file> go test ./...`. The phase and stream tests of
-`cmd/generator` build loadgen from that SDK (or use `$LOADGEN`); `-short` skips
+`go.mod` requires the vibesys-evaluator Go SDK at a pseudo-version of the vibesys
+commit the Dockerfile's `EVALUATOR_REF` names (`go list -m
+github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen@<ref>` prints it; change both
+together), so `go test ./...` works anywhere with network access. The phase and stream
+tests of `cmd/generator` build loadgen from that module (or use `$LOADGEN`); `-short` skips
 the phase tests. The stream test pins the generator's request stream for two
 phases (`cmd/generator/testdata`); `SN_STREAM_RECORD=1` re-records it, which is
 a change of the task's requests.

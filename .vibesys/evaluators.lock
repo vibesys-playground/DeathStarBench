@@ -1,6 +1,0 @@
-schema_version = 1
-
-[[package]]
-name = "vibesys-evaluator-microservice"
-version = "0.1.0"
-digest = "sha256:780413426827fe283f02f30b02604251bc77bb5893b2381026d527ca07ee60cc"

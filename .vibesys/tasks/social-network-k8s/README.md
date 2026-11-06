@@ -7,7 +7,7 @@ candidate input: the CLI versions these files as the task.
 | Path | What |
 | --- | --- |
 | `vibesys.input.toml`, `objectives.toml` | Manifest and the two Pareto objectives. |
-| `Dockerfile` | The task image every job (and the benchmark's pods) runs in: vibesys-evaluator (Python package, `loadgen`, kubectl 1.34, buildctl) from vibesys commit `505f38e556dabe86a2855708e5cde6081880b763`, and `sn-generator`, `checker` and `seed` built from `evaluator/` against that commit's Go SDK. Base images are pinned by digest. |
+| `Dockerfile` | The task image every job (and the benchmark's pods) runs in: vibesys-evaluator (Python package by pip, `loadgen` and `otelcapture` by `go install`, all from the public uw-syfi/vibesys repository at `EVALUATOR_REF`, the one place the pin is set; the evaluator's own image is private), kubectl 1.34 and buildctl, and `sn-generator`, `checker` and `seed` built from `evaluator/` against the Go SDK `evaluator/go.mod` requires at the pseudo-version of the same commit. Base images are pinned by digest. |
 | `bench.py`, `dataset.py` | The benchmark on vibesys-evaluator: the system (`k8s.App`), the seed, the workload (`sn-generator`), the phases and the validity rules; the dataset is the Go dataset's seed and digest. |
 | `run.py` | The accuracy check: `check`, `sweep`, and `ctl` (the checker's restart and flush hook). |
 | `k8s/manifest.yaml` | The application: 24 Deployments, 24 Services, 1 ConfigMap (tracing). Flat, namespaced kinds only. |
