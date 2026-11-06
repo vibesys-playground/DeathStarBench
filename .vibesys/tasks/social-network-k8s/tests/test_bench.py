@@ -1,5 +1,6 @@
 """bench.py and dataset.py:  python -m unittest discover -s tests   (needs vibesys-evaluator)"""
 
+import dataclasses
 import json
 import re
 import sys
@@ -11,14 +12,15 @@ sys.path.insert(0, str(TASK_DIR))
 
 import bench  # noqa: E402
 import dataset as ds  # noqa: E402
-from vibesys_evaluator._private import dataset as dataset_file  # noqa: E402
 
 
 class DatasetTest(unittest.TestCase):
     def test_the_file_is_what_the_generator_reads(self):
-        # snworkload.DatasetFile: {"seed": uint64, "digest": string}.
-        encoded = dataset_file.encode(ds.generate())
-        self.assertEqual(json.loads(encoded), {"seed": 0x5EED50C1A1, "digest": ds.DIGEST})
+        # snworkload.DatasetFile: {"seed": uint64, "digest": string}. vibesys-evaluator writes a
+        # dataclass dataset as an object of its fields (declaration order), so Dataset's fields
+        # are the file's.
+        self.assertEqual([f.name for f in dataclasses.fields(ds.Dataset)], ["seed", "digest"])
+        self.assertEqual(dataclasses.asdict(ds.generate()), {"seed": 0x5EED50C1A1, "digest": ds.DIGEST})
 
     def test_the_pins_are_the_go_datasets(self):
         go = (TASK_DIR / "evaluator" / "internal" / "dataset")

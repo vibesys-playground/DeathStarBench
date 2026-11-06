@@ -5,11 +5,9 @@ the task's trusted code (`bench.py`, `run.py`, the Dockerfile and the manifest).
 owned by the evaluator; any change to it is announced in the commit that makes
 it.
 
-Go module `vibesys/social-network-k8s-evaluator`. `go.mod` replaces the
-vibesys-evaluator Go SDK by the clone of the vibesys commit whose loadgen the
-task image holds (the Dockerfile's `VIBESYS_COMMIT`), at `/vse`:
-
-    replace github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen => /vse/sdk/vibesys-evaluator/loadgen
+Go module `vibesys/social-network-k8s-evaluator`. `go.mod` requires the
+vibesys-evaluator Go SDK at the release the Dockerfile's
+`VIBESYS_EVALUATOR_VERSION` names (the same as the loadgen binary the task image holds).
 
 Build (in the Dockerfile, `CGO_ENABLED=0`):
 

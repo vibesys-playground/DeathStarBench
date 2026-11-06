@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from dataclasses import fields
+from dataclasses import asdict, fields
 from pathlib import Path
 
 TASK_DIR = Path(__file__).resolve().parent.parent
@@ -21,10 +21,13 @@ GO_DATASET = TASK_DIR / "evaluator" / "internal" / "dataset" / "dataset.go"
 
 
 class DatasetTest(unittest.TestCase):
-    def test_the_file_is_what_vibesys_evaluator_writes(self):
-        from vibesys_evaluator._private import dataset as dataset_file  # noqa: PLC0415
-
-        self.assertEqual(dataset_file.encode(ds.generate()), ds.encode(ds.SPEC))
+    def test_the_file_is_the_spec_field_by_field(self):
+        """vibesys-evaluator writes a dataclass dataset as an object of its fields in declaration
+        order (documented behaviour of its dataset file); dataset.py's encode is that, for the
+        accuracy check, which does not go through the package."""
+        self.assertIs(ds.generate(), ds.SPEC)
+        self.assertEqual(json.loads(ds.encode(ds.SPEC)), asdict(ds.SPEC))
+        self.assertEqual(list(json.loads(ds.encode(ds.SPEC))), [f.name for f in fields(ds.SPEC)])
 
     def test_the_spec_is_the_go_generators(self):
         """Field names and the format are the Go Spec's (whose ParseSpec rejects others)."""

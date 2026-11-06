@@ -3,7 +3,7 @@ module vibesys/hotel-k8s-evaluator
 go 1.25.0
 
 require (
-	github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen v0.0.0
+	github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen v0.2.0-rc.1
 	go.mongodb.org/mongo-driver v1.16.0
 	google.golang.org/protobuf v1.36.12
 	vibesys/microservice-evaluator v0.0.0
@@ -30,7 +30,3 @@ require (
 replace vibesys/microservice-evaluator => /src/resources/evaluators/microservice
 
 replace github.com/uw-syfi/vibesys/sdk/vs-evaluator/vseval => /src/sdk/vs-evaluator/vseval
-
-// The vibesys-evaluator Go SDK (the generator's), from the clone of the vibesys commit whose
-// loadgen the task image holds (the Dockerfile's VIBESYS_COMMIT): one pin for both.
-replace github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen => /vse/sdk/vibesys-evaluator/loadgen
